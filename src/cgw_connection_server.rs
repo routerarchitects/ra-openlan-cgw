@@ -21,7 +21,6 @@ use crate::AppArgs;
 use crate::{
     cgw_connection_processor::{CGWConnectionProcessor, CGWConnectionProcessorReqMsg},
     cgw_db_accessor::CGWDBInfrastructureGroup,
-    cgw_devices_cache::CGWDevicesCache,
     cgw_metrics::{
         CGWMetrics, CGWMetricsCounterOpType, CGWMetricsCounterType, CGWMetricsHealthComponent,
         CGWMetricsHealthComponentStatus,
@@ -33,7 +32,6 @@ use crate::{
 
 use cgw_common::{
     cgw_errors::{Error, Result},
-    cgw_tls::cgw_tls_get_cn_from_stream,
     cgw_ucentral_parser::{
         cgw_ucentral_parse_command_message, CGWUCentralCommand, CGWUCentralCommandType,
         CGWUCentralConfigValidators,
@@ -42,6 +40,8 @@ use cgw_common::{
         cgw_detect_device_changes, CGWDevice, CGWDeviceCapabilities, CGWDeviceState, CGWDeviceType,
         OldNew,
     },
+    cgw_devices_cache::CGWDevicesCache,
+    cgw_tls::cgw_tls_get_cn_from_stream,
 };
 
 use std::str::FromStr;
@@ -185,6 +185,7 @@ pub struct CGWConnectionServer {
     pub infras_capacity: i32,
     pub local_shard_partition_key: RwLock<Option<String>>,
     pub last_update_timestamp: RwLock<i64>,
+    pub proxy_mode: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1497,6 +1498,7 @@ impl CGWConnectionServer {
             infras_capacity: app_args.cgw_group_infras_capacity,
             local_shard_partition_key: RwLock::new(None),
             last_update_timestamp: RwLock::new(0i64),
+            proxy_mode: app_args.proxy_mode,
         });
 
         CGWMetrics::get_ref().change_counter(
@@ -2840,7 +2842,7 @@ impl CGWConnectionServer {
 
     pub async fn ack_connection(
         self: Arc<Self>,
-        socket: TcpStream,
+        stream: TcpStream,
         tls_acceptor: tokio_rustls::TlsAcceptor,
         addr: SocketAddr,
     ) {
@@ -2849,28 +2851,82 @@ impl CGWConnectionServer {
         let server_clone = self.clone();
 
         self.wss_rx_tx_runtime.spawn(async move {
-            // Accept the TLS connection.
-            let (client_cn, tls_stream) = match tls_acceptor.accept(socket).await {
-                Ok(stream) => match cgw_tls_get_cn_from_stream(&stream).await {
-                    Ok(cn) => (cn, stream),
+            if !server_clone.proxy_mode {
+                // Non-proxy mode: Accept the TLS connection
+                let (client_cn, tls_stream) = match tls_acceptor.accept(stream).await {
+                    Ok(stream) => match cgw_tls_get_cn_from_stream(&stream).await {
+                        Ok(cn) => (cn, stream),
+                        Err(e) => {
+                            error!("Failed to read client CN! Error: {e}");
+                            return;
+                        }
+                    },
                     Err(e) => {
-                        error!("Failed to read client CN! Error: {e}");
+                        error!("Failed to accept connection: Error {e}");
                         return;
                     }
-                },
-                Err(e) => {
-                    error!("Failed to accept connection: Error {e}");
-                    return;
-                }
-            };
+                };
 
-            let allow_mismatch = server_clone.allow_mismatch;
-            let conn_processor = CGWConnectionProcessor::new(server_clone, addr);
-            if let Err(e) = conn_processor
-                .start(tls_stream, client_cn, allow_mismatch)
-                .await
-            {
-                error!("Failed to start connection processor! Error: {e}");
+                // Accept websocket connection from TLS stream
+                let ws_stream = tokio::select! {
+                    _val = tokio_tungstenite::accept_async(tls_stream) => {
+                        match _val {
+                            Ok(s) => s,
+                            Err(e) => {
+                                error!("Failed to accept TLS stream from: {}! Reason: {}. Closing connection",
+                                       addr, e);
+                                return;
+                            }
+                        }
+                    }
+                    // TODO: configurable duration (upon server creation)
+                    _val = sleep(Duration::from_millis(15000)) => {
+                        error!("Failed to accept TLS stream from: {}! Closing connection", addr);
+                        return;
+                    }
+                };
+
+                let allow_mismatch = server_clone.allow_mismatch;
+                let proxy_mode = server_clone.proxy_mode;
+                let conn_processor = CGWConnectionProcessor::new(server_clone, addr, proxy_mode);
+                if let Err(e) = conn_processor
+                    .start(ws_stream, client_cn, allow_mismatch)
+                    .await
+                {
+                    error!("Failed to start connection processor! Error: {e}");
+                }
+            } else {
+                // Proxy mode: Use the raw TCP stream directly
+                let client_cn: MacAddress = Default::default(); // Default CN in proxy mode
+
+                // Accept websocket connection from raw TCP stream
+                let ws_stream = tokio::select! {
+                    _val = tokio_tungstenite::accept_async(stream) => {
+                        match _val {
+                            Ok(s) => s,
+                            Err(e) => {
+                                error!("Failed to accept TCP stream from: {}! Reason: {}. Closing connection",
+                                       addr, e);
+                                return;
+                            }
+                        }
+                    }
+                    // TODO: configurable duration (upon server creation)
+                    _val = sleep(Duration::from_millis(15000)) => {
+                        error!("Failed to accept TCP stream from: {}! Closing connection", addr);
+                        return;
+                    }
+                };
+
+                let allow_mismatch = server_clone.allow_mismatch;
+                let proxy_mode = server_clone.proxy_mode;
+                let conn_processor = CGWConnectionProcessor::new(server_clone, addr, proxy_mode);
+                if let Err(e) = conn_processor
+                    .start(ws_stream, client_cn, allow_mismatch)
+                    .await
+                {
+                    error!("Failed to start connection processor! Error: {e}");
+                }
             }
         });
     }
