@@ -39,6 +39,7 @@ use chrono::Utc;
 static REDIS_KEY_SHARD_ID_PREFIX: &str = "shard_id_";
 static REDIS_KEY_SHARD_ID_FIELDS_NUM: usize = 12;
 static REDIS_KEY_SHARD_VALUE_ASSIGNED_G_NUM: &str = "assigned_groups_num";
+static REDIS_KEY_SHARD_DEVICE_CACHE_LAST_UPDATE_TIMESTAMP: &str = "_device_cache_last_update_timestamp";
 
 // Used in group assign / reassign
 static REDIS_KEY_GID: &str = "group_id_";
@@ -777,6 +778,11 @@ impl CGWRemoteDiscovery {
                 CGWMetricsCounterOpType::Inc,
             );
         }
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         Ok(())
     }
 
@@ -805,6 +811,10 @@ impl CGWRemoteDiscovery {
                 CGWMetricsCounterType::GroupsAssignedNum,
                 CGWMetricsCounterOpType::Dec,
             );
+        }
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
         }
 
         Ok(())
@@ -845,6 +855,10 @@ impl CGWRemoteDiscovery {
             )
             .await;
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         Ok(())
     }
 
@@ -881,6 +895,10 @@ impl CGWRemoteDiscovery {
                 CGWMetricsCounterOpType::DecBy(decrement_value as i64),
             )
             .await;
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
 
         Ok(())
     }
@@ -1008,6 +1026,10 @@ impl CGWRemoteDiscovery {
 
         debug!("REDIS: assigned gid{gid} to shard{dst_cgw_id}");
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         Ok(dst_cgw_id)
     }
 
@@ -1031,6 +1053,10 @@ impl CGWRemoteDiscovery {
         debug!("REDIS: deassign gid {gid} from controlled CGW");
 
         self.gid_to_cgw_cache.write().await.remove(&gid);
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
 
         Ok(())
     }
@@ -1075,6 +1101,10 @@ impl CGWRemoteDiscovery {
 
         if let Some(header) = g.cloud_header.clone() {
             self.add_group_to_header_map(g.id, header).await;
+        }
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
         }
 
         Ok(shard_id)
@@ -1144,6 +1174,10 @@ impl CGWRemoteDiscovery {
         self.remove_group_to_header_map(&gid).await;
 
         CGWMetrics::get_ref().delete_group_counter(gid).await;
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
 
         Ok(())
     }
@@ -1342,6 +1376,10 @@ impl CGWRemoteDiscovery {
             }
         }
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         // Update assigned infras num
         if let Err(e) = self
             .increment_group_assigned_infras_num(gid, assigned_infras_num)
@@ -1436,6 +1474,10 @@ impl CGWRemoteDiscovery {
                     failed_infras.push(infras[i]);
                 }
             }
+        }
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
         }
 
         // Update assigned infras num
@@ -1778,9 +1820,14 @@ impl CGWRemoteDiscovery {
             error!("rebalance_all_groups: failed update Redis timestamp! Error: {e}");
         }
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         if let Err(e) = self.sync_remote_cgw_map().await {
             error!("rebalance_all_groups: failed to sync remote CGW map! Error: {e}");
         }
+
         if let Err(e) = self.sync_gid_to_cgw_map().await {
             error!("rebalance_all_groups: failed to sync GID to CGW! Error: {e}");
         }
@@ -1889,6 +1936,10 @@ impl CGWRemoteDiscovery {
             }
         };
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         Ok(())
     }
 
@@ -1913,6 +1964,10 @@ impl CGWRemoteDiscovery {
                 ));
             }
         };
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
 
         Ok(())
     }
@@ -2036,7 +2091,8 @@ impl CGWRemoteDiscovery {
                     !key.contains(&format!("shard_id_{}|{}", self.local_shard_id, infra.mac))
                 });
             }
-
+    
+            let mut any_deleted = false;
             for key in redis_keys {
                 if let Err(res) = redis::cmd("DEL")
                     .arg(&key)
@@ -2044,6 +2100,15 @@ impl CGWRemoteDiscovery {
                     .await
                 {
                     warn!("Failed to delete cache entry {}! Error: {}", key, res);
+                } else {
+                    any_deleted = true;
+                }
+            }
+    
+            // Update the shard's last update timestamp only if at least one key was deleted
+            if any_deleted {
+                if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+                    warn!("Failed to update device cache last update timestamp! Error: {e}");
                 }
             }
         }
@@ -2121,5 +2186,64 @@ impl CGWRemoteDiscovery {
 
     pub async fn get_group_infras_from_db(&self, group_id: i32) -> Option<Vec<CGWDBInfra>> {
         self.db_accessor.clone().get_group_infras(group_id).await
+    }
+
+    pub async fn set_device_cache_last_update_timestamp(&self) -> Result<()> {
+        // Generate current UTC timestamp
+        let mut con = self.redis_infra_cache_client.clone();
+        let now = Utc::now();
+        let timestamp = now.timestamp(); // Get seconds since the UNIX epoch
+
+        let key = format!("{}{}{}", 
+            REDIS_KEY_SHARD_ID_PREFIX, 
+            self.local_shard_id, 
+            REDIS_KEY_SHARD_DEVICE_CACHE_LAST_UPDATE_TIMESTAMP
+        );
+        let res: RedisResult<()> = redis::cmd("SET")
+            .arg(key)
+            .arg(timestamp)
+            .query_async(&mut con)
+            .await;
+
+        match res {
+            Ok(_) => debug!("Updated Redis shard {} timestamp: {}", self.local_shard_id, timestamp),
+            Err(e) => {
+                if e.is_io_error() {
+                    Self::set_redis_health_state_not_ready(e.to_string()).await;
+                }
+                warn!("Failed to update Redis shard {} timestamp! Error: {}", self.local_shard_id, e);
+                return Err(Error::RemoteDiscovery("Failed to update Redis shard timestamp"));
+            }
+        };
+
+        Ok(())
+    }
+
+    pub async fn get_device_cache_last_update_timestamp(&self) -> Result<i64> {
+        let mut con = self.redis_infra_cache_client.clone();
+        let key = format!("{}{}{}", 
+            REDIS_KEY_SHARD_ID_PREFIX, 
+            self.local_shard_id,
+            REDIS_KEY_SHARD_DEVICE_CACHE_LAST_UPDATE_TIMESTAMP
+        );
+
+        let last_update_timestamp: i64 = match redis::cmd("GET")
+            .arg(key)
+            .query_async(&mut con)
+            .await
+        {
+            Ok(timestamp) => timestamp,
+            Err(e) => {
+                if e.is_io_error() {
+                    Self::set_redis_health_state_not_ready(e.to_string()).await;
+                }
+                error!("Failed to get Redis shard {} last update timestamp! Error: {}", self.local_shard_id, e);
+                return Err(Error::RemoteDiscovery(
+                    "Failed to get Redis device cache last update timestamp",
+                ));
+            }
+        };
+
+        Ok(last_update_timestamp)
     }
 }
