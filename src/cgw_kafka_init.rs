@@ -4,7 +4,7 @@ use cgw_common::{
     cgw_tls::CGW_TLS_NB_INFRA_CERTS_PATH,
 };
 
-use crate::cgw_remote_discovery::cgw_create_redis_client;
+use crate::cgw_remote_discovery::{cgw_create_redis_client, cgw_redis_default_proto};
 
 use rdkafka::admin::{AdminClient, AdminOptions, NewPartitions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
@@ -22,7 +22,7 @@ const CGW_KAFKA_TOPICS_LIST: [&str; 6] = [
 ];
 
 async fn cgw_get_active_cgw_number(redis_args: &CGWRedisArgs) -> Result<usize> {
-    let redis_client = match cgw_create_redis_client(redis_args).await {
+    let redis_client = match cgw_create_redis_client(redis_args, cgw_redis_default_proto()).await {
         Ok(client) => client,
         Err(e) => {
             return Err(Error::KafkaInit(format!(

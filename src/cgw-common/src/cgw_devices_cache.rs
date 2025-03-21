@@ -69,6 +69,7 @@ impl CGWDevicesCache {
         if let Some(value) = self.cache.get_mut(key) {
             Some(value)
         } else {
+            // try sync redis;
             None
         }
     }
