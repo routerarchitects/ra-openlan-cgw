@@ -67,6 +67,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use eui48::MacAddress;
+use std::time::Instant;
 
 type CGWConnmapType =
     Arc<RwLock<HashMap<MacAddress, UnboundedSender<CGWConnectionProcessorReqMsg>>>>;
@@ -185,6 +186,36 @@ pub struct CGWConnectionServer {
     pub last_update_timestamp: RwLock<i64>,
 }
 
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+pub enum CGWBroadcastMessageType {
+    GidAdded(i32),
+    GidRemoved(i32, Option<Vec<MacAddress>>),
+    InfraListAssigned(i32, Vec<MacAddress>),
+    InfraListDeassigned(i32, Vec<MacAddress>),
+    IfraGroupCloudHeaderChanged(i32, Option<String>),
+    IfrasCloudHeaderChanged(i32, Option<String>, Vec<MacAddress>),
+    // TODO:
+    // RebalanceDone/RebalanceInProgress ???
+    // ShardUp / ShardDown - definetely has to be implemented to ease-down
+    //   on the sync remote cgw map etc.
+    // Potentially:
+    // Arbitrary command to address specific shard? cli like interface?:
+    //   - restart shard
+    //   - issue rebalance without kafka knowledge
+    //   - manually create / delete groups / infras etc
+    //   - dump debug info?
+    //   - close connection with infra XYZ
+}
+
+// Broadcasting is needed to speedup some cache operations:
+//
+#[derive(Debug, Deserialize, Serialize)]
+struct CGWBroadcastMessage {
+    reporter_shard_id: i32,
+    gid: i32,
+    msg_type: CGWBroadcastMessageType,
+}
+
 #[derive(Debug, Clone)]
 enum CGWNBApiParsedMsgType {
     InfrastructureGroupCreate(Option<String>, Option<ConsumerMetadata>),
@@ -207,6 +238,211 @@ struct CGWNBApiParsedMsg {
     uuid: Uuid,
     gid: i32,
     msg_type: CGWNBApiParsedMsgType,
+}
+
+impl CGWBroadcastMessage {
+    fn new(gid: i32, reporter_shard_id: i32, msg_type: CGWBroadcastMessageType) -> Self {
+        Self {
+            reporter_shard_id,
+            gid,
+            msg_type,
+        }
+    }
+
+    async fn handle(self, server: Arc<CGWConnectionServer>) {
+        debug!("Received BCAST msg {:?}", self);
+
+        if server.local_cgw_id == self.reporter_shard_id {
+            debug!("Consumed but not handling local bcast ms.");
+            // Consumed own message - don't care, do nothing;
+            return;
+        }
+
+        // TODO: clone - wasting mem? Optimize?
+        match self.msg_type.clone() {
+            CGWBroadcastMessageType::GidAdded(owner_shard_id) => {
+                self.handle_infrastructure_group_added(server, owner_shard_id)
+                    .await;
+            }
+            CGWBroadcastMessageType::GidRemoved(owner_shard_id, affected_infras_list) => {
+                self.handle_infrastructure_group_removed(
+                    server,
+                    owner_shard_id,
+                    affected_infras_list,
+                )
+                .await;
+            }
+            CGWBroadcastMessageType::InfraListAssigned(owner_shard_id, affected_infras_list) => {
+                self.handle_infras_list_assigned(server, owner_shard_id, affected_infras_list)
+                    .await;
+            }
+            CGWBroadcastMessageType::InfraListDeassigned(owner_shard_id, affected_infras_list) => {
+                self.handle_infras_list_deassigned(server, owner_shard_id, affected_infras_list)
+                    .await;
+            }
+            CGWBroadcastMessageType::IfraGroupCloudHeaderChanged(owner_shard_id, new_header) => {
+                self.handle_infra_group_cloud_header_changed(server, owner_shard_id, new_header)
+                    .await;
+            }
+            CGWBroadcastMessageType::IfrasCloudHeaderChanged(
+                owner_shard_id,
+                new_header,
+                affected_infras_list,
+            ) => {
+                self.handle_infras_cloud_header_changed(
+                    server,
+                    owner_shard_id,
+                    new_header,
+                    affected_infras_list,
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn handle_infrastructure_group_added(
+        &self,
+        server: Arc<CGWConnectionServer>,
+        _owner_shard_id: i32,
+    ) {
+        debug!("gid_add entry {:?}", self);
+        // New group added, all we can do is make sure
+        // we've synced GID to CGW map;
+        // TODO: sync <single> group
+        let _ = server.cgw_remote_discovery.sync_gid_to_cgw_map().await;
+    }
+
+    async fn handle_infrastructure_group_removed(
+        &self,
+        server: Arc<CGWConnectionServer>,
+        owner_shard_id: i32,
+        affected_infras_list: Option<Vec<MacAddress>>,
+    ) {
+        debug!("gid_del entry {:?}", self);
+        // Apart from syncing GID to CGW map,
+        // we also have to make sure that provided List
+        // doesn't contain any <currently connected> to this shard
+        // infras.
+        // If so - we have to make sure we're notifying conn processors
+        // that their underlying GID's changed (unassigned).
+        // (generate events etc).
+        // TODO: sync <single> group
+        let _ = server.cgw_remote_discovery.sync_gid_to_cgw_map().await;
+
+        if owner_shard_id != server.local_cgw_id {
+            // We don't care about underlying infra list
+            // because it's a foreign (non-locally-managed group)
+            return;
+        }
+
+        server
+            .cgw_remote_discovery
+            .remove_group_infras_header(self.gid)
+            .await;
+
+        CGWMetrics::get_ref().delete_group_counter(self.gid).await;
+
+        if let Some(affected_infras_list) = affected_infras_list {
+            if !affected_infras_list.is_empty() {
+                server
+                    .cgw_remote_discovery
+                    .remove_devices_cache_from_redis(&affected_infras_list)
+                    .await;
+
+                server
+                    .clone()
+                    .notify_devices_on_gid_change(&affected_infras_list, 0)
+                    .await;
+
+                let connmap_r_lock = server.connmap.map.read().await;
+
+                let mut cache_infras_to_remove: Vec<MacAddress> = Vec::new();
+                let mut devices_cache = server.devices_cache.write().await;
+                for infra in affected_infras_list.into_iter() {
+                    if let Some(cache_device) = devices_cache.get_device_mut(&infra) {
+                        if let Some(_) = connmap_r_lock.get(&infra) {
+                            // Device is removed from group but is also currently connected
+                            cache_device.set_device_group_id(0);
+                            cache_device.set_device_remains_in_db(false);
+                        } else {
+                            cache_infras_to_remove.push(infra);
+                        }
+                    }
+                }
+
+                for cache_device in cache_infras_to_remove {
+                    devices_cache.del_device(&cache_device);
+                }
+            }
+        }
+    }
+
+    async fn handle_infras_list_assigned(
+        &self,
+        _server: Arc<CGWConnectionServer>,
+        _owner_shard_id: i32,
+        _affected_infras_list: Vec<MacAddress>,
+    ) {
+        debug!("infras_list_add entry {:?}", self);
+
+        // Do nothing, because infras list assign is always
+        // locally handled event, hence it's impossible for
+        // shard A to handle <infras assignd> for group owned
+        // by shard B.
+        //
+    }
+
+    async fn handle_infras_list_deassigned(
+        &self,
+        _server: Arc<CGWConnectionServer>,
+        _owner_shard_id: i32,
+        _affected_infras_list: Vec<MacAddress>,
+    ) {
+        debug!("infras_list_del entry {:?}", self);
+
+        // Same as <handle assigned>.
+    }
+
+    async fn handle_infra_group_cloud_header_changed(
+        &self,
+        server: Arc<CGWConnectionServer>,
+        owner_shard_id: i32,
+        new_header: Option<String>,
+    ) {
+        debug!("gid_cloud_header_set entry {:?}", self);
+
+        if owner_shard_id != server.local_cgw_id {
+            // We don't care about underlying infra list
+            // because it's a foreign (non-locally-managed group)
+            return;
+        }
+
+        server
+            .cgw_remote_discovery
+            .update_group_to_header_map(&self.gid, new_header)
+            .await;
+    }
+
+    async fn handle_infras_cloud_header_changed(
+        &self,
+        server: Arc<CGWConnectionServer>,
+        owner_shard_id: i32,
+        new_header: Option<String>,
+        affected_infras_list: Vec<MacAddress>,
+    ) {
+        debug!("infra_cloud_header_set entry {:?}", self);
+
+        if owner_shard_id != server.local_cgw_id {
+            // We don't care about underlying infra list
+            // because it's a foreign (non-locally-managed group)
+            return;
+        }
+
+        server
+            .cgw_remote_discovery
+            .update_group_infras_header_map(self.gid, affected_infras_list, new_header)
+            .await;
+    }
 }
 
 impl CGWNBApiParsedMsg {
@@ -328,6 +564,7 @@ impl CGWNBApiParsedMsg {
         consumer_metadata: Option<ConsumerMetadata>,
         timestamp: i64,
     ) {
+        let notification_msg: Option<String>;
         let response: Result<String>;
         let uuid = self.uuid;
         let gid = self.gid;
@@ -348,7 +585,7 @@ impl CGWNBApiParsedMsg {
             .create_infra_group(&group, None)
             .await
         {
-            Ok(_dst_cgw_id) => {
+            Ok(dst_cgw_id) => {
                 // We successfully updated both SQL and REDIS
                 // cache. In order to keep it in sync with local
                 // one, we have to make sure we <save> latest
@@ -357,6 +594,9 @@ impl CGWNBApiParsedMsg {
                 // of the main loop, while this very own
                 // local shard _is_ responsible for timestamp
                 // update.
+                //
+                // TODO: potentially drop timestamping in favor of direct
+                // 'broadcast' notification system.
                 {
                     let mut ts_w_lock = server.last_update_timestamp.write().await;
                     *ts_w_lock = server.get_redis_last_update_timestamp().await;
@@ -371,6 +611,20 @@ impl CGWNBApiParsedMsg {
                     consumer_metadata,
                     timestamp,
                 );
+
+                let msg = CGWBroadcastMessage::new(
+                    gid,
+                    server.local_cgw_id,
+                    CGWBroadcastMessageType::GidAdded(dst_cgw_id),
+                );
+
+                notification_msg = match serde_json::to_string(&msg) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        warn!("Failed to construct 'String' from msg: {:?} - {e}", msg);
+                        None
+                    }
+                }
             }
             Err(e) => {
                 warn!("Create group gid {gid}, uuid {uuid} request failed! Error: {e}");
@@ -384,6 +638,7 @@ impl CGWNBApiParsedMsg {
                     consumer_metadata,
                     timestamp,
                 );
+                notification_msg = None;
             }
         }
 
@@ -394,6 +649,16 @@ impl CGWNBApiParsedMsg {
                 CGWKafkaProducerTopic::CnCRes,
                 partition,
             );
+
+            if let Some(notification_msg) = notification_msg {
+                if let Err(e) = server
+                    .cgw_remote_discovery
+                    .send_broadcast_message(notification_msg)
+                    .await
+                {
+                    warn!("Handled GID create successfully, but send_broadcast_message failed - {e}");
+                }
+            }
         } else {
             error!("Failed to construct infra_group_create message!");
         }
@@ -407,6 +672,7 @@ impl CGWNBApiParsedMsg {
         consumer_metadata: Option<ConsumerMetadata>,
         timestamp: i64,
     ) {
+        let notification_msg: Option<String>;
         let response: Result<String>;
         let uuid = self.uuid;
         let gid = self.gid;
@@ -427,7 +693,7 @@ impl CGWNBApiParsedMsg {
             .create_infra_group(&group, Some(shard_id))
             .await
         {
-            Ok(_dst_cgw_id) => {
+            Ok(dst_cgw_id) => {
                 // We successfully updated both SQL and REDIS
                 // cache. In order to keep it in sync with local
                 // one, we have to make sure we <save> latest
@@ -436,6 +702,9 @@ impl CGWNBApiParsedMsg {
                 // of the main loop, while this very own
                 // local shard _is_ responsible for timestamp
                 // update.
+                //
+                // TODO: potentially drop timestamping in favor of direct
+                // 'broadcast' notification system.
                 {
                     let mut ts_w_lock = server.last_update_timestamp.write().await;
                     *ts_w_lock = server.get_redis_last_update_timestamp().await;
@@ -450,6 +719,20 @@ impl CGWNBApiParsedMsg {
                     consumer_metadata,
                     timestamp,
                 );
+
+                let msg = CGWBroadcastMessage::new(
+                    gid,
+                    server.local_cgw_id,
+                    CGWBroadcastMessageType::GidAdded(dst_cgw_id),
+                );
+
+                notification_msg = match serde_json::to_string(&msg) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        warn!("Failed to construct 'String' from msg: {:?} {e}", msg);
+                        None
+                    }
+                }
             }
             Err(e) => {
                 warn!("Create group gid {gid}, uuid {uuid} request failed, reason: {e}");
@@ -465,6 +748,8 @@ impl CGWNBApiParsedMsg {
                     consumer_metadata,
                     timestamp,
                 );
+
+                notification_msg = None;
             }
         }
 
@@ -475,6 +760,16 @@ impl CGWNBApiParsedMsg {
                 CGWKafkaProducerTopic::CnCRes,
                 partition,
             );
+
+            if let Some(notification_msg) = notification_msg {
+                if let Err(e) = server
+                    .cgw_remote_discovery
+                    .send_broadcast_message(notification_msg)
+                    .await
+                {
+                    warn!("Handled GID create successfully, but send_broadcast_message failed - {e}");
+                }
+            }
         } else {
             error!("Failed to construct infra_group_create message!");
         }
@@ -486,6 +781,14 @@ impl CGWNBApiParsedMsg {
         consumer_metadata: Option<ConsumerMetadata>,
         timestamp: i64,
     ) {
+        // List of infras that were members of said GID that is being deleted.
+        // Usefull to track / notify about these in place of deleting the GID,
+        // as shard that is handling request can easily retrieve the list of
+        // affected infras and notify any interested parties about change,
+        // to speedup IN-RAM cache manipulations for example.
+        let affected_infras_list: Option<Vec<MacAddress>>;
+        let owner_shard_id: Option<i32>;
+        let notification_msg: Option<String>;
         let response: Result<String>;
         let lock = server.devices_cache.clone();
         let uuid = self.uuid;
@@ -494,6 +797,31 @@ impl CGWNBApiParsedMsg {
             Some(data) => data.sender_partition,
             None => None,
         };
+
+        if let Some(infras_list) = server
+            .cgw_remote_discovery
+            .get_group_infras_from_db(gid)
+            .await
+        {
+            let mut infras: Vec<MacAddress> = Vec::new();
+
+            for x in infras_list.into_iter() {
+                infras.push(x.mac);
+            }
+
+            if !infras.is_empty() {
+                affected_infras_list = Some(infras);
+            } else {
+                affected_infras_list = None;
+            }
+        } else {
+            affected_infras_list = None;
+        }
+
+        owner_shard_id = server
+            .cgw_remote_discovery
+            .get_infra_group_owner_id(gid)
+            .await;
 
         match server
             .cgw_remote_discovery
@@ -536,6 +864,34 @@ impl CGWNBApiParsedMsg {
                     consumer_metadata,
                     timestamp,
                 );
+
+                if let Some(ref affected_infras_list) = affected_infras_list {
+                    if !affected_infras_list.is_empty() {
+                        server
+                            .clone()
+                            .notify_devices_on_gid_change(&affected_infras_list, 0)
+                            .await;
+                    }
+                }
+
+                if let Some(owner_shard_id) = owner_shard_id {
+                    let msg = CGWBroadcastMessage::new(
+                        gid,
+                        server.local_cgw_id,
+                        CGWBroadcastMessageType::GidRemoved(owner_shard_id, affected_infras_list),
+                    );
+
+                    notification_msg = match serde_json::to_string(&msg) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            warn!("Failed to construct 'String' from msg: {:?} - {e}", msg);
+                            None
+                        }
+                    }
+                } else {
+                    // TODO: properly handle? How this scenario can actually happen?
+                    notification_msg = None;
+                }
             }
             Err(e) => {
                 warn!("Destroy group gid {gid}, uuid {uuid} request failed! Error: {e}");
@@ -549,6 +905,8 @@ impl CGWNBApiParsedMsg {
                     consumer_metadata,
                     timestamp,
                 );
+
+                notification_msg = None;
             }
         }
 
@@ -559,6 +917,16 @@ impl CGWNBApiParsedMsg {
                 CGWKafkaProducerTopic::CnCRes,
                 partition,
             );
+
+            if let Some(notification_msg) = notification_msg {
+                if let Err(e) = server
+                    .cgw_remote_discovery
+                    .send_broadcast_message(notification_msg)
+                    .await
+                {
+                    warn!("Handled GID destroy successfully, but send_broadcast_message failed - {e}");
+                }
+            }
         } else {
             error!("Failed to construct infra_group_delete message!");
         }
@@ -572,6 +940,7 @@ impl CGWNBApiParsedMsg {
         consumer_metadata: Option<ConsumerMetadata>,
         timestamp: i64,
     ) {
+        let owner_shard_id: Option<i32>;
         let local_shard_partition_key = {
             // Drop lock as soon as we return value
             server.local_shard_partition_key.read().await
@@ -583,6 +952,11 @@ impl CGWNBApiParsedMsg {
             Some(data) => data.sender_partition,
             None => None,
         };
+
+        owner_shard_id = server
+            .cgw_remote_discovery
+            .get_infra_group_owner_id(gid)
+            .await;
 
         if (server
             .cgw_remote_discovery
@@ -616,6 +990,7 @@ impl CGWNBApiParsedMsg {
             warn!(
                 "Unexpected: tried to add infra list to nonexisting group, gid {gid}, uuid {uuid}!"
             );
+
             return;
         }
 
@@ -634,7 +1009,8 @@ impl CGWNBApiParsedMsg {
                 // Notify all of them about the change.
                 server
                     .clone()
-                    .notify_devices_on_gid_change(success_infras.clone(), gid);
+                    .notify_devices_on_gid_change(&success_infras, gid)
+                    .await;
 
                 successful_infras = success_infras;
                 is_success = true;
@@ -654,7 +1030,8 @@ impl CGWNBApiParsedMsg {
                 if !infras_to_notify.is_empty() {
                     server
                         .clone()
-                        .notify_devices_on_gid_change(infras_to_notify.clone(), gid);
+                        .notify_devices_on_gid_change(&infras_to_notify, gid)
+                        .await;
                     successful_infras = infras_to_notify;
                 }
 
@@ -697,7 +1074,7 @@ impl CGWNBApiParsedMsg {
         }
 
         let devices_cache_read = server.devices_cache.read().await;
-        for infra in successful_infras {
+        for infra in successful_infras.clone().into_iter() {
             let queue_lock = CGW_MESSAGES_QUEUE.read().await;
 
             // Update queue state if it exists
@@ -764,6 +1141,31 @@ impl CGWNBApiParsedMsg {
                 }
             }
         }
+
+        if let Some(owner_shard_id) = owner_shard_id {
+            let notification_msg: String;
+
+            let msg = CGWBroadcastMessage::new(
+                gid,
+                server.local_cgw_id,
+                CGWBroadcastMessageType::InfraListAssigned(owner_shard_id, successful_infras),
+            );
+
+            notification_msg = match serde_json::to_string(&msg) {
+                Ok(notification_msg) => notification_msg,
+                Err(e) => {
+                    warn!("Failed to construct 'String' from msg: {:?} - {e}", msg);
+                    return;
+                }
+            };
+            if let Err(e) = server
+                .cgw_remote_discovery
+                .send_broadcast_message(notification_msg)
+                .await
+            {
+                warn!("Handled infras list add successfully, but send_broadcast_message failed - {e}");
+            }
+        }
     }
 
     async fn handle_infrastructure_group_infras_del(
@@ -773,6 +1175,14 @@ impl CGWNBApiParsedMsg {
         consumer_metadata: Option<ConsumerMetadata>,
         timestamp: i64,
     ) {
+        // List of infras that were members of said GID that is being deleted.
+        // Usefull to track / notify about these in place of deleting the GID,
+        // as shard that is handling request can easily retrieve the list of
+        // affected infras and notify any interested parties about change,
+        // to speedup IN-RAM cache manipulations for example.
+        let mut affected_infras_list: Vec<MacAddress> = Vec::new();
+        let owner_shard_id: Option<i32>;
+        let notification_msg: Option<String>;
         let local_shard_partition_key = {
             // Drop lock as soon as we return value
             server.local_shard_partition_key.read().await
@@ -783,6 +1193,11 @@ impl CGWNBApiParsedMsg {
             Some(data) => data.sender_partition,
             None => None,
         };
+
+        owner_shard_id = server
+            .cgw_remote_discovery
+            .get_infra_group_owner_id(gid)
+            .await;
 
         if (server
             .cgw_remote_discovery
@@ -827,7 +1242,27 @@ impl CGWNBApiParsedMsg {
                 // Group del == unassigned (0)
                 server
                     .clone()
-                    .notify_devices_on_gid_change(infras_list.clone(), 0i32);
+                    .notify_devices_on_gid_change(&infras_list, 0i32)
+                    .await;
+
+                if let Some(owner_shard_id) = owner_shard_id {
+                    let msg = CGWBroadcastMessage::new(
+                        gid,
+                        server.local_cgw_id,
+                        CGWBroadcastMessageType::InfraListDeassigned(owner_shard_id, infras_list),
+                    );
+
+                    notification_msg = match serde_json::to_string(&msg) {
+                        Ok(s) => Some(s),
+                        Err(e) => {
+                            warn!("Failed to construct 'String' from msg: {:?}", msg);
+                            None
+                        }
+                    }
+                } else {
+                    // TODO: properly handle? How this scenario can actually happen?
+                    notification_msg = None;
+                }
 
                 is_success = true;
             }
@@ -847,7 +1282,32 @@ impl CGWNBApiParsedMsg {
                     if !infras_to_notify.is_empty() {
                         server
                             .clone()
-                            .notify_devices_on_gid_change(infras_to_notify, 0i32);
+                            .notify_devices_on_gid_change(&infras_to_notify, 0i32)
+                            .await;
+
+                        if let Some(owner_shard_id) = owner_shard_id {
+                            let msg = CGWBroadcastMessage::new(
+                                gid,
+                                server.local_cgw_id,
+                                CGWBroadcastMessageType::InfraListDeassigned(
+                                    owner_shard_id,
+                                    infras_to_notify,
+                                ),
+                            );
+
+                            notification_msg = match serde_json::to_string(&msg) {
+                                Ok(s) => Some(s),
+                                Err(e) => {
+                                    warn!("Failed to construct 'String' from msg: {:?}", msg);
+                                    None
+                                }
+                            }
+                        } else {
+                            // TODO: properly handle? How this scenario can actually happen?
+                            notification_msg = None;
+                        }
+                    } else {
+                        notification_msg = None;
                     }
 
                     warn!("Failed to destroy few MACs from infras list (partial delete)!");
@@ -859,6 +1319,7 @@ impl CGWNBApiParsedMsg {
                     error_message = Some(format!(
                         "Unknown error occurred while deleting MACs, gid {gid}, uuid {uuid}"
                     ));
+                    notification_msg = None;
                 }
             }
         };
@@ -880,6 +1341,16 @@ impl CGWNBApiParsedMsg {
                 CGWKafkaProducerTopic::CnCRes,
                 partition,
             );
+
+            if let Some(notification_msg) = notification_msg {
+                if let Err(e) = server
+                    .cgw_remote_discovery
+                    .send_broadcast_message(notification_msg)
+                    .await
+                {
+                    warn!("Handled infras_del successfully, but send_broadcast_message failed!");
+                }
+            }
         } else {
             error!("Failed to construct infra_group_device_del message!");
         }
@@ -1513,19 +1984,6 @@ impl CGWConnectionServer {
             server_clone.start_queue_timeout_manager().await;
         });
 
-        if let Err(e) = server.cgw_remote_discovery.sync_devices_cache().await {
-            error!("Failed to sync infras with Redis devices cache! Error: {e}");
-        }
-
-        // Sync RAM cache with Redis.
-        if let Err(e) = server
-            .cgw_remote_discovery
-            .sync_devices_cache_with_redis(server.devices_cache.clone())
-            .await
-        {
-            error!("Failed to sync Device cache! Error: {e}");
-        }
-
         let server_clone = server.clone();
         server.mbox_nb_api_runtime_handle.spawn(async move {
             server_clone.process_internal_nb_api_mbox(nb_api_rx).await;
@@ -1955,28 +2413,23 @@ impl CGWConnectionServer {
         });
     }
 
-    fn notify_devices_on_gid_change(self: Arc<Self>, infras_list: Vec<MacAddress>, new_gid: i32) {
-        tokio::spawn(async move {
-            // If we receive NB API add/del infra req,
-            // and under storm of connections,
-            // both conn ACK / as well as processing of this
-            // request degrades heavily, due to single
-            // sync.prim used in both - connmap lock;
-            // TODO: investigate potential for resolving this
-            // performance drop (lazy cache?)
-            let connmap_r_lock = self.connmap.map.read().await;
-            let msg: CGWConnectionProcessorReqMsg =
-                CGWConnectionProcessorReqMsg::GroupIdChanged(new_gid);
+    async fn notify_devices_on_gid_change(
+        self: Arc<Self>,
+        infras_list: &Vec<MacAddress>,
+        new_gid: i32,
+    ) {
+        let connmap_r_lock = self.connmap.map.read().await;
+        let msg: CGWConnectionProcessorReqMsg =
+            CGWConnectionProcessorReqMsg::GroupIdChanged(new_gid);
 
-            for mac in infras_list.iter() {
-                if let Some(c) = connmap_r_lock.get(mac) {
-                    match c.send(msg.clone()) {
-                        Ok(_) => debug!("Notified {mac} about GID change (->{new_gid})"),
-                        Err(e) => warn!("Failed to send GID change notification! Error: {e}"),
-                    }
+        for mac in infras_list.iter() {
+            if let Some(c) = connmap_r_lock.get(mac) {
+                match c.send(msg.clone()) {
+                    Ok(_) => debug!("Notified {mac} about GID change (->{new_gid})"),
+                    Err(e) => warn!("Failed to send GID change notification! Error: {e}"),
                 }
             }
-        });
+        }
     }
 
     async fn get_redis_last_update_timestamp(&self) -> i64 {
@@ -1987,7 +2440,10 @@ impl CGWConnectionServer {
         {
             Ok(timestamp) => timestamp,
             Err(e) => {
-                self.cgw_remote_discovery.set_redis_last_update_timestamp().await.ok();
+                self.cgw_remote_discovery
+                    .set_redis_last_update_timestamp()
+                    .await
+                    .ok();
                 error!("{e}");
                 0i64
             }
@@ -2033,6 +2489,8 @@ impl CGWConnectionServer {
         // This only means that original capacity of all buffers is allocated to <100>,
         // it can still increase on demand or need automatically (upon insert, push_back etc)
         let cgw_buf_prealloc_size = 100;
+        // TODO: potentially drop timestamping in favor of direct
+        // 'broadcast' notification system.
         let mut last_update_timestamp: i64 = {
             let mut ts_w_lock = self.last_update_timestamp.write().await;
             *ts_w_lock = self.get_redis_last_update_timestamp().await;
@@ -2042,6 +2500,59 @@ impl CGWConnectionServer {
         let mut local_shard_partition_key: Option<String>;
 
         loop {
+            'mbox_msg_handle_loop: loop {
+                // The 'broadcast' messages from remote CGWs have the highest priority
+                // of evaluation and handling, because:
+                //   * handling of underlying infras while is disconnected from NB API
+                //     or processing of remote messages, it is still internally
+                //     dependant over data that might change in runtime such as
+                //     cloud header, GID association etc;
+                //   * the decision this shard in particular makes while processing
+                //     NB messages has to be made based on the most actual data
+                //     available - redis cache synced, dev cache is up to date,
+                //     remote mapping is the latest.
+                if let Some(bcast_msg) =
+                    self.cgw_remote_discovery.receive_broadcast_message().await
+                {
+                    let msg: CGWBroadcastMessage = match serde_json::from_str(&bcast_msg) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!("Received msg {:?} but failed to parse it to concrete message type: {e}", bcast_msg);
+                            continue;
+                        }
+                    };
+
+                    // Received message which notifies us about (potential) redis changes.
+                    // Based on the underlying message, the following can happen:
+                    //   * resync (specific) device cache (if needed);
+                    //   * resync remote CGW list (if needed);
+                    //   * resync GID to CGW map (if needed);
+                    //
+                    // This enables 'atomic' handling of events - in case if a single group
+                    // gets removed, only those caches of the members of the group would be
+                    // altered (GID -> 0, unassigned / GID -> X, assigned).
+                    //
+                    // The handlers shouldn't filter out the reporter shard id,
+                    // hence it gives the following flexibility:
+                    //   * Underlying offloaded data (redis, SQL etc) is being
+                    //     manipulated (if needed) upon processing Kafka messages
+                    //     received from NB services;
+                    //   * TODO: RETHINK!!! : We can actually process locally-generated events,
+                    //     e.g. generated by local shard, addressed to local shard for
+                    //     'later-on' processing
+                    //
+                    //
+                    // TODO: update 'last_update_timestamp' in the underlying func?
+                    //       update here - just in place?
+                    msg.handle(self.clone()).await;
+                } else {
+                    // Just to be explicit:
+                    // no bcast message received ->
+                    // proceed as usual - try to see if we have
+                    // and NB api messages etc.
+                    break 'mbox_msg_handle_loop;
+                }
+            }
             if num_of_msg_read < buf_capacity {
                 // Try to recv_many, but don't sleep too much
                 // in case if no messaged pending and we have
@@ -2068,54 +2579,6 @@ impl CGWConnectionServer {
                 };
                 num_of_msg_read += rd_num;
 
-                if rd_num != 0 {
-                    let current_timestamp: i64 = self.get_redis_last_update_timestamp().await;
-
-                    if last_update_timestamp != current_timestamp {
-                        if let Err(e) = self.cgw_remote_discovery.sync_gid_to_cgw_map().await {
-                            error!("process_internal_nb_api_mbox: failed to sync GID to CGW map! Error: {e}");
-                        }
-
-                        if let Err(e) = self.cgw_remote_discovery.sync_devices_cache().await {
-                            error!("process_internal_nb_api_mbox: failed to sync Devices cache! Error: {e}");
-                        }
-
-                        if let Err(e) = self
-                            .cgw_remote_discovery
-                            .sync_devices_cache_with_redis(self.devices_cache.clone())
-                            .await
-                        {
-                            error!("Failed to sync Device cache! Error: {e}");
-                        }
-
-                        {
-                            let mut ts_w_lock = self.last_update_timestamp.write().await;
-                            *ts_w_lock = current_timestamp;
-                            last_update_timestamp = current_timestamp
-                        }
-
-                        let mut infras_list: Vec<MacAddress> = Vec::new();
-                        let connmap_r_lock = self.connmap.map.read().await;
-
-                        for (infra_mac, _) in connmap_r_lock.iter() {
-                            match self.devices_cache.read().await.get_device(infra_mac) {
-                                Some(infra) => {
-                                    if infra.get_device_group_id() == 0 {
-                                        infras_list.push(*infra_mac);
-                                    }
-                                }
-                                None => {
-                                    infras_list.push(*infra_mac);
-                                }
-                            }
-                        }
-
-                        if !infras_list.is_empty() {
-                            self.clone().notify_devices_on_gid_change(infras_list, 0);
-                        }
-                    }
-                }
-
                 // We read some messages, try to continue and read more
                 // If none read - break from recv, process all buffers that've
                 // been filled-up so far (both local and remote).
@@ -2126,6 +2589,20 @@ impl CGWConnectionServer {
             }
 
             debug!("Received {num_of_msg_read} messages from NB API, processing...");
+            {
+                let current_timestamp: i64 = self.get_redis_last_update_timestamp().await;
+
+                if last_update_timestamp != current_timestamp {
+                    if let Err(e) = self.cgw_remote_discovery.sync_gid_to_cgw_map().await {
+                        error!("process_internal_nb_api_mbox: failed to sync GID to CGW map! Error: {e}");
+                    }
+
+                    let mut ts_w_lock = self.last_update_timestamp.write().await;
+                    *ts_w_lock = current_timestamp;
+                    last_update_timestamp = current_timestamp
+
+                }
+            }
 
             let timestamp = cgw_get_timestamp_16_digits();
 
@@ -2499,6 +2976,21 @@ impl CGWConnectionServer {
                     };
 
                     let mut devices_cache = self.devices_cache.write().await;
+
+                    if !devices_cache.check_device_exists(&device_mac) {
+                        debug!(
+                            "Mac {} is not in ram cache, trying to sync with redis...",
+                            device_mac
+                        );
+                        // Don't care if succeeded, case handled in place below
+                        let _ = self
+                            .cgw_remote_discovery
+                            .sync_single_device_cache_with_redis(
+                                &mut *devices_cache,
+                                device_mac.clone(),
+                            )
+                            .await;
+                    }
                     let cache_item = devices_cache.get_device_mut(&device_mac);
                     let mut device_group_id: i32 = 0;
                     let mut group_owner_shard_id: i32 = 0;
@@ -2523,24 +3015,26 @@ impl CGWConnectionServer {
                         infra.set_device_type(device_type);
                         infra.update_device_capabilities(&caps);
 
-                        // Update Redis Cache
-                        match serde_json::to_string(infra) {
-                            Ok(device_json) => {
-                                if let Err(e) = self
-                                    .cgw_remote_discovery
-                                    .add_device_to_redis_cache(&device_mac, &device_json)
-                                    .await
-                                {
-                                    error!("{e}");
-                                }
-                            }
-                            Err(e) => {
-                                error!("Failed to serialize device to json string! Error: {e}");
-                            }
-                        }
-
                         // Detect Capabilities changes as device exists in Cache
                         capability_changes = cgw_detect_device_changes(&current_device_caps, &caps);
+
+                        if let Some(_) = capability_changes {
+                            // Update Redis Cache only if there's a caps change
+                            match serde_json::to_string(infra) {
+                                Ok(device_json) => {
+                                    if let Err(e) = self
+                                        .cgw_remote_discovery
+                                        .add_device_to_redis_cache(&device_mac, &device_json)
+                                        .await
+                                    {
+                                        error!("{e}");
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to serialize device to json string! Error: {e}");
+                                }
+                            }
+                        }
                     } else {
                         // Infra is not found in RAM Cache - try to get it from PostgreSQL DB
                         if let Some(infra) = self
@@ -2567,37 +3061,47 @@ impl CGWConnectionServer {
                         );
                         devices_cache.add_device(&device_mac, &device);
 
-                        // Update Redis Cache
-                        match serde_json::to_string(&device) {
-                            Ok(device_json) => {
-                                if let Err(e) = self
-                                    .cgw_remote_discovery
-                                    .add_device_to_redis_cache(&device_mac, &device_json)
-                                    .await
-                                {
-                                    error!("{e}");
+                        if device_group_id != 0 {
+                            // Update Redis Cache, only if it's an assigned infra
+                            match serde_json::to_string(&device) {
+                                Ok(device_json) => {
+                                    if let Err(e) = self
+                                        .cgw_remote_discovery
+                                        .add_device_to_redis_cache(&device_mac, &device_json)
+                                        .await
+                                    {
+                                        error!("{e}");
+                                    }
                                 }
-                            }
-                            Err(e) => {
-                                error!("Failed to serialize device to json string! Error: {e}");
+                                Err(e) => {
+                                    error!("Failed to serialize device to json string! Error: {e}");
+                                }
                             }
                         }
                     }
+                    let unassigned_infra_join: bool = device_group_id == 0;
 
-                    // Construct cloud header
-                    let group_cloud_header: Option<String> = self
-                        .cgw_remote_discovery
-                        .get_group_cloud_header(device_group_id)
-                        .await;
-                    let infras_cloud_header: Option<String> = self
-                        .cgw_remote_discovery
-                        .get_group_infra_cloud_header(device_group_id, &device_mac)
-                        .await;
+                    let mut group_cloud_header: Option<String> = None;
+                    let mut infras_cloud_header: Option<String> = None;
+                    let mut cloud_header: Option<String> = None;
 
-                    let cloud_header: Option<String> =
-                        cgw_construct_cloud_header(group_cloud_header, infras_cloud_header);
+                    // Unassigned? Means no header, both group and infra
+                    if !unassigned_infra_join {
+                        group_cloud_header = self
+                            .cgw_remote_discovery
+                            .get_group_cloud_header(device_group_id)
+                            .await;
 
-                    // Check if foreign infra connection - send event
+                        infras_cloud_header = self
+                            .cgw_remote_discovery
+                            .get_group_infra_cloud_header(device_group_id, &device_mac)
+                            .await;
+
+                        cloud_header =
+                            cgw_construct_cloud_header(group_cloud_header, infras_cloud_header);
+                    }
+
+                    // Send foreign infra join event if Detected
                     if foreign_infra_join {
                         debug!("Detected foreign infra {} connection. Group: {}, Group Shard Owner: {}", device_mac.to_hex_string(), device_group_id, group_owner_shard_id);
 
@@ -2620,12 +3124,14 @@ impl CGWConnectionServer {
                             error!("Failed to construct foreign_infra_connection message!");
                         }
 
+                        // Send uCentral message that instructs infra to rejoin to
+                        // proper <owner> shard id.
+                        // TODO: disable once in proxy mode.
                         self.clone()
                             .notify_device_on_foreign_connection(device_mac, group_owner_shard_id);
                     }
 
                     // Send [un]assigned infra join message
-                    let unassigned_infra_join: bool = device_group_id == 0;
                     let join_message = match unassigned_infra_join {
                         true => {
                             debug!(
@@ -2669,39 +3175,45 @@ impl CGWConnectionServer {
                     }
 
                     // Check where there capabilities change event should be sent
-                    if let Some(diff) = capability_changes {
-                        let group_cloud_header: Option<String> = self
-                            .cgw_remote_discovery
-                            .get_group_cloud_header(device_group_id)
-                            .await;
-                        let infras_cloud_header: Option<String> = self
-                            .cgw_remote_discovery
-                            .get_group_infra_cloud_header(device_group_id, &device_mac)
-                            .await;
+                    // capability_changes will be None in case if it's unassigned infra,
+                    // but we're paranoid and should make decision based on concrete
+                    // evidence that it's unassigned -> gid==0, rather than
+                    // subtle evidence, such as <no capability_changes> detected
+                    if !unassigned_infra_join {
+                        if let Some(diff) = capability_changes {
+                            let group_cloud_header: Option<String> = self
+                                .cgw_remote_discovery
+                                .get_group_cloud_header(device_group_id)
+                                .await;
+                            let infras_cloud_header: Option<String> = self
+                                .cgw_remote_discovery
+                                .get_group_infra_cloud_header(device_group_id, &device_mac)
+                                .await;
 
-                        let cloud_header: Option<String> =
-                            cgw_construct_cloud_header(group_cloud_header, infras_cloud_header);
+                            let cloud_header: Option<String> =
+                                cgw_construct_cloud_header(group_cloud_header, infras_cloud_header);
 
-                        if let Ok(resp) = cgw_construct_infra_capabilities_changed_msg(
-                            device_mac,
-                            device_group_id,
-                            &diff,
-                            self.local_cgw_id,
-                            cloud_header,
-                            timestamp,
-                        ) {
-                            self.enqueue_mbox_message_from_cgw_to_nb_api(
+                            if let Ok(resp) = cgw_construct_infra_capabilities_changed_msg(
+                                device_mac,
                                 device_group_id,
-                                resp,
-                                CGWKafkaProducerTopic::Connection,
-                                None,
-                            );
-                        } else {
-                            error!("Failed to construct device_capabilities_changed message!");
+                                &diff,
+                                self.local_cgw_id,
+                                cloud_header,
+                                timestamp,
+                            ) {
+                                self.enqueue_mbox_message_from_cgw_to_nb_api(
+                                    device_group_id,
+                                    resp,
+                                    CGWKafkaProducerTopic::Connection,
+                                    None,
+                                );
+                            } else {
+                                error!("Failed to construct device_capabilities_changed message!");
+                            }
                         }
                     }
 
-                    // Update topomap
+                    // Update topomap; Irrelevant whether infra's assigned or not
                     if self.feature_topomap_enabled {
                         let topomap = CGWUCentralTopologyMap::get_ref();
                         topomap
@@ -2733,6 +3245,7 @@ impl CGWConnectionServer {
                         if device.get_device_remains_in_db() {
                             device.set_device_state(CGWDeviceState::CGWDeviceDisconnected);
 
+                            // TODO: rethink whether this redis changes is really needed
                             match serde_json::to_string(device) {
                                 Ok(device_json) => {
                                     if let Err(e) = self
@@ -2749,6 +3262,9 @@ impl CGWConnectionServer {
                             }
                         } else {
                             devices_cache.del_device(&device_mac);
+                            // TODO: verify: We don't _save_ unassigned infras to redis cache,
+                            // hence there's nothing to remove.
+                            /*
                             if let Err(e) = self
                                 .cgw_remote_discovery
                                 .del_device_from_redis_cache(&device_mac)
@@ -2756,9 +3272,15 @@ impl CGWConnectionServer {
                             {
                                 error!("{e}");
                             }
+                            */
                         }
                     } else {
+                        warn!(
+                            "Unexpected: closing {device_mac} connection, that is absent in cache"
+                        );
                         // Infra is not found in RAM Cache - try to get it from PostgreSQL DB
+                        //
+                        // TODO: check - is such scenario even really possible?
                         if let Some(infra) = self
                             .cgw_remote_discovery
                             .get_infra_from_db(device_mac)
@@ -2767,6 +3289,11 @@ impl CGWConnectionServer {
                             device_group_id = infra.infra_group_id;
                         }
                     }
+                    let unassigned_infra_leave: bool = device_group_id == 0;
+
+                    let mut group_cloud_header: Option<String> = None;
+                    let mut infras_cloud_header: Option<String> = None;
+                    let mut cloud_header: Option<String> = None;
 
                     // Insert device to disconnected device list
                     {
@@ -2776,6 +3303,22 @@ impl CGWConnectionServer {
                             .await;
                     }
 
+                    // Unassigned? Means no header, both group and infra
+                    if !unassigned_infra_leave {
+                        group_cloud_header = self
+                            .cgw_remote_discovery
+                            .get_group_cloud_header(device_group_id)
+                            .await;
+
+                        infras_cloud_header = self
+                            .cgw_remote_discovery
+                            .get_group_infra_cloud_header(device_group_id, &device_mac)
+                            .await;
+
+                        cloud_header =
+                            cgw_construct_cloud_header(group_cloud_header, infras_cloud_header);
+                    }
+
                     if self.feature_topomap_enabled {
                         let topomap = CGWUCentralTopologyMap::get_ref();
                         topomap
@@ -2783,20 +3326,7 @@ impl CGWConnectionServer {
                             .await;
                     }
 
-                    let group_cloud_header: Option<String> = self
-                        .cgw_remote_discovery
-                        .get_group_cloud_header(device_group_id)
-                        .await;
-                    let infras_cloud_header: Option<String> = self
-                        .cgw_remote_discovery
-                        .get_group_infra_cloud_header(device_group_id, &device_mac)
-                        .await;
-
-                    let cloud_header: Option<String> =
-                        cgw_construct_cloud_header(group_cloud_header, infras_cloud_header);
-
                     // Send [un]assigned infra leave message
-                    let unassigned_infra_leave: bool = device_group_id == 0;
                     let leave_message = match unassigned_infra_leave {
                         true => cgw_construct_unassigned_infra_leave_msg(
                             device_mac,

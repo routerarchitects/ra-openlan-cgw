@@ -689,6 +689,7 @@ impl CGWConnectionProcessor {
                                 self.connect_message.clone(),
                                 timestamp,
                             ) {
+                                debug!("Sending unassigned join msg");
                                 self.cgw_server.enqueue_mbox_message_from_cgw_to_nb_api(
                                     new_group_id,
                                     unassigned_join,
@@ -995,23 +996,27 @@ impl CGWConnectionProcessor {
                     if let CGWConnectionState::IsActive = state {
                         continue;
                     } else if let CGWConnectionState::IsForcedToClose = state {
+                        let _ = sink.close().await;
                         // Return, because server already closed our mbox tx counterpart (rx),
                         // hence we don't need to send ConnectionClosed message. Server
                         // already knows we're closed.
                         return;
                     } else if let CGWConnectionState::ClosedGracefully = state {
+                        let _ = sink.close().await;
                         warn!(
                             "Remote client {} closed connection gracefully!",
                             self.serial.to_hex_string()
                         );
                         return self.send_connection_close_event().await;
                     } else if let CGWConnectionState::IsStale = state {
+                        let _ = sink.close().await;
                         warn!(
                             "Remote client {} closed due to inactivity!",
                             self.serial.to_hex_string()
                         );
                         return self.send_connection_close_event().await;
                     } else if let CGWConnectionState::IsDead = state {
+                        let _ = sink.close().await;
                         warn!(
                             "Remote client {} connection is dead!",
                             self.serial.to_hex_string()
