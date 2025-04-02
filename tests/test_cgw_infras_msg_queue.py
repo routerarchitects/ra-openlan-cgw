@@ -42,6 +42,8 @@ class TestCgwInfrasMsgQueue:
             print(f'Failed to get shard 0 info from Redis!')
             raise Exception('Failed to get shard 0 info from Redis!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
 
@@ -172,6 +174,8 @@ class TestCgwInfrasMsgQueue:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
