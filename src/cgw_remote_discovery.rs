@@ -23,7 +23,7 @@ use std::{
 };
 
 use redis::{
-    aio::{ConnectionManager, ConnectionManagerConfig, MultiplexedConnection},
+    aio::{ConnectionManager, ConnectionManagerConfig},
     Client, ConnectionInfo, ProtocolVersion, PushInfo, PushKind, RedisConnectionInfo, RedisResult,
     TlsCertificates, ToRedisArgs, Value,
 };
@@ -33,7 +33,7 @@ use eui48::MacAddress;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{
-        mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+        mpsc::UnboundedReceiver,
         Mutex, RwLock,
     },
     time::{sleep, Duration},

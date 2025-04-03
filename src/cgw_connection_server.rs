@@ -69,7 +69,6 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use eui48::MacAddress;
-use std::time::Instant;
 
 type CGWConnmapType =
     Arc<RwLock<HashMap<MacAddress, UnboundedSender<CGWConnectionProcessorReqMsg>>>>;
@@ -3671,11 +3670,11 @@ impl CGWConnectionServer {
 #[cfg(test)]
 mod tests {
 
-    use crate::{
-        cgw_errors::Result,
+    use cgw_common::{
+        cgw_ucentral_parser::{CGWUCentralEvent, CGWUCentralEventType},
         cgw_ucentral_ap_parser::cgw_ucentral_ap_parse_message,
+        cgw_errors::Result,
     };
-    use cgw_common::cgw_ucentral_parser::{CGWUCentralEvent, CGWUCentralEventType};
 
     fn get_connect_json_msg() -> &'static str {
         r#"
