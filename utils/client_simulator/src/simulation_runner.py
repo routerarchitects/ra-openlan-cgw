@@ -181,8 +181,12 @@ class Device:
         if self._socket is None:
             # 20 seconds is more then enough to establish connection and exchange
             # them handshakes.
-            self._socket = client.connect(
-                self.server_addr, ssl=self.ssl_context, open_timeout=20, close_timeout=20)
+            try:
+                self._socket = client.connect(
+                    self.server_addr, ssl=self.ssl_context, open_timeout=20, close_timeout=20)
+            except Exception as e:
+                logger.error("Failed to establish connection: ")
+
         return self._socket
 
     def disconnect(self):
@@ -192,15 +196,17 @@ class Device:
 
     def single_run(self):
         logger.debug("starting simulation")
-        self.connect()
         start = time.time()
         try:
-            self.send_hello(self._socket)
             while True:
                 if self._socket is None:
                     logger.error(
                         "Connection to GW is lost. Trying to reconnect...")
-                    self.connect()
+                    if self.connect():
+                        self.send_hello(self._socket)
+                    else:
+                        time.sleep(1)
+                        continue
                 if time.time() - start > self.interval:
                     logger.info(f"Device sim heartbeat")
                     self.send_state_event(self._socket)
@@ -217,15 +223,17 @@ class Device:
         if self.stop_event.is_set():
             return
         logger.debug("starting simulation")
-        self.connect()
         start = time.time()
         try:
-            self.send_hello(self._socket)
             while not self.stop_event.is_set():
                 if self._socket is None:
                     logger.error(
                         "Connection to GW is lost. Trying to reconnect...")
-                    self.connect()
+                    if self.connect():
+                        self.send_hello(self._socket)
+                    else:
+                        time.sleep(1)
+                        continue
                 if time.time() - start > self.interval:
                     logger.info(f"Device sim heartbeat")
                     self.send_state_event(self._socket)

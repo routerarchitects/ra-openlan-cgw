@@ -106,14 +106,6 @@ struct CGWBroadcastMessage {
 }
 
 impl CGWBroadcastMessage {
-    // fn new(gid: i32, reporter_shard_id: i32, msg_type: CGWBroadcastMessageType) -> Self {
-    //     Self {
-    //         reporter_shard_id,
-    //         gid,
-    //         msg_type,
-    //     }
-    // }
-
     async fn handle(self, server: Arc<ProxyConnectionServer>) {
         debug!("Received BCAST msg {:?}", self);
 

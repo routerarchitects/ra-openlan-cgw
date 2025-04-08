@@ -312,10 +312,9 @@ def generate_docker_compose_file(instances_num: int,
     certs_realpath = get_realpath(DEFAULT_CERTS_PATH)
 
     proxy_image_tag = get_cgw_image_tag(True)
-    # proxy_image_tag = proxy_image_tag + "-proxy"
 
     proxy_image_name = get_proxy_image_base_name()
-    
+
     proxy_container_name = get_proxy_container_base_name()
 
     print(f'Generate Docker Compose file!')
