@@ -4,9 +4,7 @@ use cgw_common::{
     cgw_tls::cgw_tls_create_db_connect,
 };
 
-use crate::{
-    cgw_metrics::{CGWMetrics, CGWMetricsHealthComponent, CGWMetricsHealthComponentStatus},
-};
+use crate::cgw_metrics::{CGWMetrics, CGWMetricsHealthComponent, CGWMetricsHealthComponentStatus};
 
 use eui48::MacAddress;
 
@@ -328,32 +326,6 @@ impl CGWDBAccessor {
             Err(e) => {
                 error!("Failed to delete infra! Error: {e}");
                 Err(Error::DbAccessor("Delete infra failed"))
-            }
-        }
-    }
-
-    pub async fn get_all_infras(&self) -> Option<Vec<CGWDBInfra>> {
-        let mut list: Vec<CGWDBInfra> = Vec::new();
-
-        let res = self.cl.query("SELECT * from infras", &[]).await;
-
-        match res {
-            Ok(r) => {
-                for x in r {
-                    match CGWDBInfra::try_from(x) {
-                        Ok(infra) => {
-                            list.push(infra);
-                        }
-                        Err(e) => {
-                            error!("Failed to construct CGWDBInfra! Error: {e}");
-                        }
-                    }
-                }
-                Some(list)
-            }
-            Err(e) => {
-                error!("Failed to retrieve infras from DB! Error: {e}");
-                None
             }
         }
     }

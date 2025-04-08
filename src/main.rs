@@ -8,9 +8,9 @@ mod cgw_nb_api_listener;
 mod cgw_remote_client;
 mod cgw_remote_discovery;
 mod cgw_remote_server;
+mod cgw_runtime;
 mod cgw_ucentral_messages_queue_manager;
 mod cgw_ucentral_topology_map;
-mod cgw_runtime;
 
 #[macro_use]
 extern crate log;
@@ -39,12 +39,11 @@ use cgw_metrics::CGWMetrics;
 use cgw_runtime::cgw_initialize_runtimes;
 
 use cgw_common::{
-    cgw_errors::{Error, Result},
     cgw_app_args::AppArgs,
-    AppCoreLogLevel,
-    cgw_tls::cgw_tls_create_acceptor,
-    signal_handler,
+    cgw_errors::{Error, Result},
     cgw_set_tcp_keepalive_options,
+    cgw_tls::cgw_tls_create_acceptor,
+    signal_handler, AppCoreLogLevel,
 };
 
 pub struct AppCore {

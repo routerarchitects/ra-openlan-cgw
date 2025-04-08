@@ -31,17 +31,17 @@ use crate::{
 };
 
 use cgw_common::{
-    cgw_errors::{Error, Result},
-    cgw_ucentral_parser::{
-        cgw_ucentral_parse_command_message, CGWUCentralCommand, CGWUCentralCommandType,
-        CGWUCentralConfigValidators,
-    },
     cgw_device::{
         cgw_detect_device_changes, CGWDevice, CGWDeviceCapabilities, CGWDeviceState, CGWDeviceType,
         OldNew,
     },
     cgw_devices_cache::CGWDevicesCache,
+    cgw_errors::{Error, Result},
     cgw_tls::cgw_tls_get_cn_from_stream,
+    cgw_ucentral_parser::{
+        cgw_ucentral_parse_command_message, CGWUCentralCommand, CGWUCentralCommandType,
+        CGWUCentralConfigValidators,
+    },
 };
 
 use std::str::FromStr;
@@ -658,7 +658,9 @@ impl CGWNBApiParsedMsg {
                     .send_broadcast_message(notification_msg)
                     .await
                 {
-                    warn!("Handled GID create successfully, but send_broadcast_message failed - {e}");
+                    warn!(
+                        "Handled GID create successfully, but send_broadcast_message failed - {e}"
+                    );
                 }
             }
         } else {
@@ -769,7 +771,9 @@ impl CGWNBApiParsedMsg {
                     .send_broadcast_message(notification_msg)
                     .await
                 {
-                    warn!("Handled GID create successfully, but send_broadcast_message failed - {e}");
+                    warn!(
+                        "Handled GID create successfully, but send_broadcast_message failed - {e}"
+                    );
                 }
             }
         } else {
@@ -926,7 +930,9 @@ impl CGWNBApiParsedMsg {
                     .send_broadcast_message(notification_msg)
                     .await
                 {
-                    warn!("Handled GID destroy successfully, but send_broadcast_message failed - {e}");
+                    warn!(
+                        "Handled GID destroy successfully, but send_broadcast_message failed - {e}"
+                    );
                 }
             }
         } else {
@@ -1165,7 +1171,9 @@ impl CGWNBApiParsedMsg {
                 .send_broadcast_message(notification_msg)
                 .await
             {
-                warn!("Handled infras list add successfully, but send_broadcast_message failed - {e}");
+                warn!(
+                    "Handled infras list add successfully, but send_broadcast_message failed - {e}"
+                );
             }
         }
     }
@@ -1182,7 +1190,6 @@ impl CGWNBApiParsedMsg {
         // as shard that is handling request can easily retrieve the list of
         // affected infras and notify any interested parties about change,
         // to speedup IN-RAM cache manipulations for example.
-        let mut affected_infras_list: Vec<MacAddress> = Vec::new();
         let owner_shard_id: Option<i32>;
         let notification_msg: Option<String>;
         let local_shard_partition_key = {
@@ -1256,7 +1263,7 @@ impl CGWNBApiParsedMsg {
 
                     notification_msg = match serde_json::to_string(&msg) {
                         Ok(s) => Some(s),
-                        Err(e) => {
+                        Err(_) => {
                             warn!("Failed to construct 'String' from msg: {:?}", msg);
                             None
                         }
@@ -1299,7 +1306,7 @@ impl CGWNBApiParsedMsg {
 
                             notification_msg = match serde_json::to_string(&msg) {
                                 Ok(s) => Some(s),
-                                Err(e) => {
+                                Err(_) => {
                                     warn!("Failed to construct 'String' from msg: {:?}", msg);
                                     None
                                 }
@@ -1345,7 +1352,7 @@ impl CGWNBApiParsedMsg {
             );
 
             if let Some(notification_msg) = notification_msg {
-                if let Err(e) = server
+                if let Err(_) = server
                     .cgw_remote_discovery
                     .send_broadcast_message(notification_msg)
                     .await
@@ -2514,8 +2521,7 @@ impl CGWConnectionServer {
                 //     NB messages has to be made based on the most actual data
                 //     available - redis cache synced, dev cache is up to date,
                 //     remote mapping is the latest.
-                if let Some(bcast_msg) =
-                    self.cgw_remote_discovery.receive_broadcast_message().await
+                if let Some(bcast_msg) = self.cgw_remote_discovery.receive_broadcast_message().await
                 {
                     let msg: CGWBroadcastMessage = match serde_json::from_str(&bcast_msg) {
                         Ok(m) => m,
@@ -2603,7 +2609,6 @@ impl CGWConnectionServer {
                     let mut ts_w_lock = self.last_update_timestamp.write().await;
                     *ts_w_lock = current_timestamp;
                     last_update_timestamp = current_timestamp
-
                 }
             }
 
@@ -3084,18 +3089,16 @@ impl CGWConnectionServer {
                     }
                     let unassigned_infra_join: bool = device_group_id == 0;
 
-                    let mut group_cloud_header: Option<String> = None;
-                    let mut infras_cloud_header: Option<String> = None;
                     let mut cloud_header: Option<String> = None;
 
                     // Unassigned? Means no header, both group and infra
                     if !unassigned_infra_join {
-                        group_cloud_header = self
+                        let group_cloud_header = self
                             .cgw_remote_discovery
                             .get_group_cloud_header(device_group_id)
                             .await;
 
-                        infras_cloud_header = self
+                        let infras_cloud_header = self
                             .cgw_remote_discovery
                             .get_group_infra_cloud_header(device_group_id, &device_mac)
                             .await;
@@ -3294,8 +3297,6 @@ impl CGWConnectionServer {
                     }
                     let unassigned_infra_leave: bool = device_group_id == 0;
 
-                    let mut group_cloud_header: Option<String> = None;
-                    let mut infras_cloud_header: Option<String> = None;
                     let mut cloud_header: Option<String> = None;
 
                     // Insert device to disconnected device list
@@ -3308,12 +3309,12 @@ impl CGWConnectionServer {
 
                     // Unassigned? Means no header, both group and infra
                     if !unassigned_infra_leave {
-                        group_cloud_header = self
+                        let group_cloud_header = self
                             .cgw_remote_discovery
                             .get_group_cloud_header(device_group_id)
                             .await;
 
-                        infras_cloud_header = self
+                        let infras_cloud_header = self
                             .cgw_remote_discovery
                             .get_group_infra_cloud_header(device_group_id, &device_mac)
                             .await;
@@ -3671,9 +3672,9 @@ impl CGWConnectionServer {
 mod tests {
 
     use cgw_common::{
-        cgw_ucentral_parser::{CGWUCentralEvent, CGWUCentralEventType},
-        cgw_ucentral_ap_parser::cgw_ucentral_ap_parse_message,
         cgw_errors::Result,
+        cgw_ucentral_ap_parser::cgw_ucentral_ap_parse_message,
+        cgw_ucentral_parser::{CGWUCentralEvent, CGWUCentralEventType},
     };
 
     fn get_connect_json_msg() -> &'static str {

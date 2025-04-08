@@ -1,9 +1,9 @@
 use cgw_common::{
-    cgw_errors::{Error, Result},
     cgw_app_args::CGWKafkaArgs,
+    cgw_device::OldNew,
+    cgw_errors::{Error, Result},
     cgw_tls::CGW_TLS_NB_INFRA_CERTS_PATH,
     cgw_ucentral_parser::CGWDeviceChange,
-    cgw_device::OldNew,
 };
 
 use crate::cgw_connection_server::{CGWConnectionNBAPIReqMsg, CGWConnectionNBAPIReqMsgOrigin};

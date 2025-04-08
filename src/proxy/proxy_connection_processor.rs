@@ -13,7 +13,7 @@ use std::{net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpStream,
     sync::mpsc::{unbounded_channel, UnboundedReceiver},
-    time::{sleep, Duration, Instant},
+    time::{sleep, Duration},
 };
 use tokio_rustls::server::TlsStream;
 use tokio_tungstenite::{tungstenite::protocol::Message, WebSocketStream};
@@ -27,10 +27,7 @@ type CGWStream = WebSocketStream<MaybeTlsStream>;
 type CGWSink = SplitSink<CGWStream, Message>;
 type CGWSource = SplitStream<CGWStream>;
 
-use crate::proxy_connection_server::{
-    ProxyConnectionServer,
-    ProxyConnectionServerReqMsg,
-};
+use crate::proxy_connection_server::{ProxyConnectionServer, ProxyConnectionServerReqMsg};
 
 #[derive(Debug, Clone)]
 pub enum ProxyConnectionProcessorReqMsg {
@@ -44,6 +41,7 @@ pub struct ProxyConnectionProcessor {
     pub serial: MacAddress,
     pub addr: SocketAddr,
     peer_addr: Option<String>,
+    proxy_msg: String,
 }
 
 impl ProxyConnectionProcessor {
@@ -53,6 +51,7 @@ impl ProxyConnectionProcessor {
             serial: MacAddress::default(),
             addr,
             peer_addr: None,
+            proxy_msg: String::default(),
         };
 
         conn_processor
@@ -140,6 +139,12 @@ impl ProxyConnectionProcessor {
 
         self.serial = evt.serial;
 
+        self.proxy_msg = format!(
+            "{{\"type\": \"proxy_connect\", \"peer_address\": \"{}\", \"cert_validated\": true, \"serial\": \"{}\"}}",
+            self.addr,
+            self.serial.to_hex_string()
+        );
+
         // TODO: we accepted tls stream and split the WS into RX TX part,
         // now we have to ASK proxy_connection_server's permission whether
         // we can proceed on with this underlying connection.
@@ -147,10 +152,7 @@ impl ProxyConnectionProcessor {
         // we can proceed.
         debug!("Sending ACK request for device serial: {}", self.serial);
         let (mbox_tx, mut mbox_rx) = unbounded_channel::<ProxyConnectionProcessorReqMsg>();
-        let msg = ProxyConnectionServerReqMsg::AddNewConnection(
-            evt.serial,
-            mbox_tx,
-        );
+        let msg = ProxyConnectionServerReqMsg::AddNewConnection(evt.serial, mbox_tx);
         self.proxy_server
             .enqueue_mbox_message_to_proxy_server(msg)
             .await;
@@ -177,7 +179,8 @@ impl ProxyConnectionProcessor {
             return Err(Error::ConnectionProcessor("WebSocket connection declined"));
         }
 
-        self.process_connection(stream, sink, mbox_rx, message).await;
+        self.process_connection(stream, sink, mbox_rx, message)
+            .await;
 
         Ok(())
     }
@@ -200,45 +203,37 @@ impl ProxyConnectionProcessor {
             BrokenCGWConnection,
         }
 
-        let mut last_contact = Instant::now();
-
-        // References to the CGW connection that can be updated
         let mut cgw_sink: Option<CGWSink> = None;
         let mut cgw_stream: Option<CGWSource> = None;
 
         loop {
             let mut wakeup_reason: WakeupReason = WakeupReason::Unspecified;
 
-            // Check for messages from the proxy server (mbox)
             if let Some(val) = mbox_rx.recv().now_or_never() {
                 wakeup_reason = WakeupReason::MboxRx(val);
             } else {
+                if cgw_stream.is_none() {
+                    // TODO: In this case we won't handle Close AP event (rethink\fix)
+                    sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
                 // Check for messages from the client
                 match stream.next().now_or_never() {
-                    Some(val) => {
-                        match val {
-                            Some(res) => wakeup_reason = WakeupReason::InfraWSSMessage(res),
-                            None => wakeup_reason = WakeupReason::BrokenInfraConnection,
-                        }
+                    Some(val) => match val {
+                        Some(res) => wakeup_reason = WakeupReason::InfraWSSMessage(res),
+                        None => wakeup_reason = WakeupReason::BrokenInfraConnection,
                     },
                     None => {
                         // Check for messages from CGW if connection exists
                         if let Some(ref mut cgw_stream_inner) = cgw_stream {
                             match cgw_stream_inner.next().now_or_never() {
-                                Some(val) => {
-                                    match val {
-                                        Some(res) => wakeup_reason = WakeupReason::CGWWSSMessage(res),
-                                        None => wakeup_reason = WakeupReason::BrokenCGWConnection,
-                                    }
+                                Some(val) => match val {
+                                    Some(res) => wakeup_reason = WakeupReason::CGWWSSMessage(res),
+                                    None => wakeup_reason = WakeupReason::BrokenCGWConnection,
                                 },
                                 None => {
-                                    // For now consider a connection stale after 5 minutes of inactivity
-                                    if Instant::now().duration_since(last_contact) > Duration::from_secs(300) {
-                                        wakeup_reason = WakeupReason::StaleConnection;
-                                    } else {
-                                        // Sleep briefly to avoid busy waiting
-                                        sleep(Duration::from_millis(1000)).await;
-                                    }
+                                    wakeup_reason = WakeupReason::StaleConnection;
+                                    sleep(Duration::from_millis(1000)).await;
                                 }
                             }
                         } else {
@@ -252,167 +247,66 @@ impl ProxyConnectionProcessor {
             // Handle the wakeup reason
             match wakeup_reason {
                 WakeupReason::InfraWSSMessage(res) => {
-                    last_contact = Instant::now();
-                    match res {
-                        Ok(msg) => {
-                            match msg {
-                                Close(_) => {
-                                    debug!("client {} requested graceful close", self.serial);
-                                    // Try to close CGW connection gracefully if it exists
-                                    if let Some(ref mut cgw_sink_inner) = cgw_sink {
-                                        cgw_sink_inner.send(Message::Close(None)).await.ok();
-                                    }
-                                    self.send_connection_close_event().await;
-                                    break;
-                                },
-                                _ => {
-                                    // Forward message to CGW if connection exists
-                                    if let Some(ref mut cgw_sink_inner) = cgw_sink {
-                                        debug!("Forwarding message from client {} to CGW", self.serial);
-                                        if let Err(e) = cgw_sink_inner.send(msg).await {
-                                            error!("Failed to forward client message to CGW: {}", e);
-
-                                            // Attempt to reconnect if connection failed
-                                            // TODO: fix Message was lost
-                                            cgw_sink = None;
-                                            cgw_stream = None;
-                                            if let Ok(connected) = self.connect_to_peer(&mut cgw_sink, &mut cgw_stream, original_connect_message.clone()).await {
-                                                if !connected {
-                                                    error!("Failed to reconnect to CGW, will retry later");
-                                                }
-                                            } else {
-                                                // This should almost never happen, but handle just in case
-                                                error!("Critical error in connect_to_peer, connection processor will terminate");
-                                                break;
-                                            }
-                                        }
-                                    } else {
-                                        debug!("Received client message but no CGW connection exists for {}", self.serial);
-                                        // Buffer message or drop it as appropriate
-                                    }
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            error!("Error receiving message from client {}: {}", self.serial, e);
-                            break;
-                        }
+                    if !self
+                        .handle_client_message(
+                            res,
+                            &mut cgw_sink,
+                            &mut cgw_stream,
+                            &original_connect_message,
+                        )
+                        .await
+                    {
+                        break;
                     }
-                },
+                }
                 WakeupReason::CGWWSSMessage(res) => {
-                    last_contact = Instant::now();
-                    match res {
-                        Ok(msg) => {
-                            match msg {
-                                Close(_) => {
-                                    debug!("CGW requested graceful close for client {}", self.serial);
-                                    // Try to close client connection gracefully
-                                    sink.send(Message::Close(None)).await.ok();
-                                    self.send_connection_close_event().await;
-                                    sleep(Duration::from_secs(2)).await;
-                                    break;
-                                },
-                                _ => {
-                                    // Forward message to client
-                                    debug!("Forwarding message from CGW to client {}", self.serial);
-                                    if let Err(e) = sink.send(msg).await {
-                                        error!("Failed to forward CGW message to client {}: {}", self.serial, e);
-                                        break;
-                                    }
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            error!("Error receiving message from CGW for client {}: {}", self.serial, e);
-
-                            self.send_connection_close_event().await;
-
-                            // Attempt to reconnect if needed
-                            cgw_sink = None;
-                            cgw_stream = None;
-                            if let Ok(connected) = self.connect_to_peer(&mut cgw_sink, &mut cgw_stream, original_connect_message.clone()).await {
-                                if !connected {
-                                    error!("Failed to reconnect to CGW, will retry later");
-                                }
-                            } else {
-                                // This should almost never happen, but handle just in case
-                                error!("Critical error in connect_to_peer, connection processor will terminate");
-                                break;
-                            }
-                        }
+                    if !self
+                        .handle_cgw_wss_message(
+                            res,
+                            &mut sink,
+                            &mut cgw_sink,
+                            &mut cgw_stream,
+                            &original_connect_message,
+                        )
+                        .await
+                    {
+                        break;
                     }
-                },
+                }
                 WakeupReason::MboxRx(msg) => {
-                    if let Some(server_msg) = msg {
-                        match server_msg {
-                            ProxyConnectionProcessorReqMsg::AddNewConnectionShouldClose => {
-                                debug!("Proxy server requested to close connection for client {}", self.serial);
-                                break;
-                            },
-                            ProxyConnectionProcessorReqMsg::SetPeer(peer_addr) => {
-                                debug!("Received peer address update for client {}: {}", self.serial, peer_addr);
-
-                                if self.peer_addr != Some(peer_addr.clone()) {
-                                    self.peer_addr = Some(peer_addr.clone());
-                                    // Establish connection to the new peer
-                                    if let Ok(connected) = self.connect_to_peer(&mut cgw_sink, &mut cgw_stream, original_connect_message.clone()).await {
-                                        if !connected {
-                                            error!("Failed to connect to peer {} for client {}, will retry later",
-                                                    peer_addr, self.serial);
-                                        } else {
-                                            debug!("Successfully established connection to peer {} for client {}",
-                                                    peer_addr, self.serial);
-                                        }
-                                    } else {
-                                        error!("Critical error connecting to peer {}, connection processor will terminate", peer_addr);
-                                        break;
-                                    }
-                                }
-                            },
-                            _ => {
-                                debug!("Received unhandled server message for client {}: {:?}", self.serial, server_msg);
-                            }
-                        }
-                    } else {
-                        // mbox_rx channel closed - proxy server is shutting down
-                        debug!("Proxy server channel closed for client {}", self.serial);
+                    if !self
+                        .handle_mbox_rx_message(
+                            msg,
+                            &mut cgw_sink,
+                            &mut cgw_stream,
+                            &original_connect_message,
+                        )
+                        .await
+                    {
                         break;
                     }
-                },
+                }
                 WakeupReason::StaleConnection => {
-                    warn!("Connection for client {} is stale, closing after {} seconds of inactivity",
-                         self.serial, Instant::now().duration_since(last_contact).as_secs());
-                    break;
-                },
+                    // Handle stale connection logic
+                    // No action needed currently
+                }
                 WakeupReason::BrokenInfraConnection => {
-                    warn!("client {} connection broken", self.serial);
-                    // Try to close CGW connection gracefully if it exists
-                    if let Some(ref mut cgw_sink_inner) = cgw_sink {
-                        cgw_sink_inner.send(Message::Close(None)).await.ok();
-                    }
-                    self.send_connection_close_event().await;
+                    self.handle_broken_infra_connection(&mut cgw_sink).await;
                     break;
-                },
+                }
                 WakeupReason::BrokenCGWConnection => {
-                    warn!("CGW connection broken for client {}", self.serial);
-
-                    self.send_connection_close_event().await;
-
-                    debug!("Connection broken, attempting to reconnect to CGW.");
-                    cgw_sink = None;
-                    cgw_stream = None;
-                    if let Ok(connected) = self.connect_to_peer(&mut cgw_sink, &mut cgw_stream, original_connect_message.clone()).await {
-                        if !connected {
-                            error!("Failed to reconnect to CGW, will retry later");
-                        }
-                    } else {
-                        // This should almost never happen, but handle just in case
-                        error!("Critical error in connect_to_peer, connection processor will terminate");
+                    if !self
+                        .handle_broken_cgw_connection(
+                            &mut cgw_sink,
+                            &mut cgw_stream,
+                            &original_connect_message,
+                        )
+                        .await
+                    {
                         break;
                     }
-                },
+                }
                 WakeupReason::Unspecified => {
-                    // No action needed, just loop again
                     sleep(Duration::from_millis(1000)).await;
                 }
             }
@@ -423,14 +317,243 @@ impl ProxyConnectionProcessor {
         self.send_connection_close_event().await;
     }
 
-    async fn connect_to_peer(&mut self,
+    async fn handle_client_message(
+        &mut self,
+        res: std::result::Result<Message, tungstenite::error::Error>,
         cgw_sink: &mut Option<CGWSink>,
         cgw_stream: &mut Option<CGWSource>,
-        original_connect_message: Message) -> Result<bool>
-    {
+        original_connect_message: &Message,
+    ) -> bool {
+        match res {
+            Ok(msg) => {
+                match msg {
+                    Close(_) => {
+                        debug!("client {} requested graceful close", self.serial);
+                        // Try to close CGW connection gracefully if it exists
+                        if let Some(ref mut cgw_sink_inner) = cgw_sink {
+                            cgw_sink_inner.send(Message::Close(None)).await.ok();
+                        }
+                        self.send_connection_close_event().await;
+                        return false; // Break the main loop
+                    }
+                    _ => {
+                        // Forward message to CGW if connection exists
+                        if let Some(ref mut cgw_sink_inner) = cgw_sink {
+                            debug!("Forwarding message from client {} to CGW", self.serial);
+                            if let Err(e) = cgw_sink_inner.send(msg).await {
+                                error!("Failed to forward client message to CGW: {}", e);
+
+                                // Attempt to reconnect if connection failed
+                                // TODO: fix Message was lost
+                                *cgw_sink = None;
+                                *cgw_stream = None;
+                                if let Ok(connected) = self
+                                    .connect_to_peer(
+                                        cgw_sink,
+                                        cgw_stream,
+                                        original_connect_message.clone(),
+                                    )
+                                    .await
+                                {
+                                    if !connected {
+                                        error!("Failed to reconnect to CGW, will retry later");
+                                    }
+                                } else {
+                                    // This should almost never happen, but handle just in case
+                                    error!("Critical error in connect_to_peer, connection processor will terminate");
+                                    return false; // Break the main loop
+                                }
+                            }
+                        } else {
+                            debug!(
+                                "Received client message but no CGW connection exists for {}",
+                                self.serial
+                            );
+                            // Buffer message or drop it as appropriate
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Error receiving message from client {}: {}", self.serial, e);
+                return false; // Break the main loop
+            }
+        }
+        true // Continue the main loop
+    }
+
+    async fn handle_cgw_wss_message(
+        &mut self,
+        res: std::result::Result<Message, tungstenite::error::Error>,
+        sink: &mut SSink,
+        cgw_sink: &mut Option<CGWSink>,
+        cgw_stream: &mut Option<CGWSource>,
+        original_connect_message: &Message,
+    ) -> bool {
+        match res {
+            Ok(msg) => {
+                match msg {
+                    Close(_) => {
+                        debug!("CGW requested graceful close for client {}", self.serial);
+                        // Try to close client connection gracefully
+                        sink.send(Message::Close(None)).await.ok();
+                        self.send_connection_close_event().await;
+                        sleep(Duration::from_secs(2)).await;
+                        return false; // Break the main loop
+                    }
+                    _ => {
+                        // Forward message to client
+                        debug!("Forwarding message from CGW to client {}", self.serial);
+                        if let Err(e) = sink.send(msg).await {
+                            error!(
+                                "Failed to forward CGW message to client {}: {}",
+                                self.serial, e
+                            );
+                            return false; // Break the main loop
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Error receiving message from CGW for client {}: {}",
+                    self.serial, e
+                );
+
+                self.send_connection_close_event().await;
+
+                // Attempt to reconnect if needed
+                *cgw_sink = None;
+                *cgw_stream = None;
+                if let Ok(connected) = self
+                    .connect_to_peer(cgw_sink, cgw_stream, original_connect_message.clone())
+                    .await
+                {
+                    if !connected {
+                        error!("Failed to reconnect to CGW, will retry later");
+                    }
+                } else {
+                    // This should almost never happen, but handle just in case
+                    error!(
+                        "Critical error in connect_to_peer, connection processor will terminate"
+                    );
+                    return false; // Break the main loop
+                }
+            }
+        }
+        true // Continue the main loop
+    }
+
+    async fn handle_mbox_rx_message(
+        &mut self,
+        msg: Option<ProxyConnectionProcessorReqMsg>,
+        cgw_sink: &mut Option<CGWSink>,
+        cgw_stream: &mut Option<CGWSource>,
+        original_connect_message: &Message,
+    ) -> bool {
+        if let Some(server_msg) = msg {
+            match server_msg {
+                ProxyConnectionProcessorReqMsg::AddNewConnectionShouldClose => {
+                    debug!(
+                        "Proxy server requested to close connection for client {}",
+                        self.serial
+                    );
+                    return false; // Break the main loop
+                }
+                ProxyConnectionProcessorReqMsg::SetPeer(peer_addr) => {
+                    debug!(
+                        "Received peer address update for client {}: {}",
+                        self.serial, peer_addr
+                    );
+
+                    if self.peer_addr != Some(peer_addr.clone()) {
+                        self.peer_addr = Some(peer_addr.clone());
+                        // Establish connection to the new peer
+                        if let Ok(connected) = self
+                            .connect_to_peer(cgw_sink, cgw_stream, original_connect_message.clone())
+                            .await
+                        {
+                            if !connected {
+                                error!(
+                                    "Failed to connect to peer {} for client {}, will retry later",
+                                    peer_addr, self.serial
+                                );
+                            } else {
+                                debug!(
+                                    "Successfully established connection to peer {} for client {}",
+                                    peer_addr, self.serial
+                                );
+                            }
+                        } else {
+                            error!("Critical error connecting to peer {}, connection processor will terminate", peer_addr);
+                            return false; // Break the main loop
+                        }
+                    }
+                }
+                _ => {
+                    debug!(
+                        "Received unhandled server message for client {}: {:?}",
+                        self.serial, server_msg
+                    );
+                }
+            }
+        } else {
+            // mbox_rx channel closed - proxy server is shutting down
+            debug!("Proxy server channel closed for client {}", self.serial);
+            return false; // Break the main loop
+        }
+        true // Continue the main loop
+    }
+
+    async fn handle_broken_infra_connection(&mut self, cgw_sink: &mut Option<CGWSink>) {
+        warn!("client {} connection broken", self.serial);
+        // Try to close CGW connection gracefully if it exists
+        if let Some(ref mut cgw_sink_inner) = cgw_sink {
+            cgw_sink_inner.send(Message::Close(None)).await.ok();
+        }
+        self.send_connection_close_event().await;
+    }
+
+    async fn handle_broken_cgw_connection(
+        &mut self,
+        cgw_sink: &mut Option<CGWSink>,
+        cgw_stream: &mut Option<CGWSource>,
+        original_connect_message: &Message,
+    ) -> bool {
+        warn!("CGW connection broken for client {}", self.serial);
+
+        self.send_connection_close_event().await;
+
+        debug!("Connection broken, attempting to reconnect to CGW.");
+        *cgw_sink = None;
+        *cgw_stream = None;
+        if let Ok(connected) = self
+            .connect_to_peer(cgw_sink, cgw_stream, original_connect_message.clone())
+            .await
+        {
+            if !connected {
+                error!("Failed to reconnect to CGW, will retry later");
+            }
+        } else {
+            // This should almost never happen, but handle just in case
+            error!("Critical error in connect_to_peer, connection processor will terminate");
+            return false; // Break the main loop
+        }
+        true // Continue the main loop
+    }
+
+    async fn connect_to_peer(
+        &mut self,
+        cgw_sink: &mut Option<CGWSink>,
+        cgw_stream: &mut Option<CGWSource>,
+        original_connect_message: Message,
+    ) -> Result<bool> {
         // If we already have an active connection, close it first
         if cgw_sink.is_some() && cgw_stream.is_some() {
-            debug!("Closing existing CGW connection for client {} before establishing new one", self.serial);
+            debug!(
+                "Closing existing CGW connection for client {} before establishing new one",
+                self.serial
+            );
             if let Some(sink) = cgw_sink {
                 // Try to close the existing connection gracefully
                 sink.send(Message::Close(None)).await.ok();
@@ -456,9 +579,12 @@ impl ProxyConnectionProcessor {
 
         let (ws_stream, _response) = match cgw_connection {
             Ok((ws_stream, resp)) => {
-                debug!("WebSocket handshake with CGW completed with status: {}", resp.status());
+                debug!(
+                    "WebSocket handshake with CGW completed with status: {}",
+                    resp.status()
+                );
                 (ws_stream, resp)
-            },
+            }
             Err(e) => {
                 error!("Failed to establish WebSocket connection with CGW: {}", e);
                 // Return failure but don't crash the processor
@@ -468,15 +594,8 @@ impl ProxyConnectionProcessor {
 
         let (sink, stream) = ws_stream.split();
 
-        // Send initial proxy connect message to CGW
-        let proxy_message = format!(
-            "{{\"type\": \"proxy_connect\", \"peer_address\": \"{}\", \"cert_validated\": true, \"serial\": \"{}\"}}",
-            self.addr,
-            self.serial.to_hex_string()
-        );
-
         let mut new_sink = sink;
-        if let Err(e) = new_sink.send(Message::Text(proxy_message)).await {
+        if let Err(e) = new_sink.send(Message::Text(self.proxy_msg.clone())).await {
             error!("Failed to send proxy info to CGW: {}", e);
             // Return failure but don't crash the processor
             return Ok(false);
@@ -492,7 +611,10 @@ impl ProxyConnectionProcessor {
         *cgw_sink = Some(new_sink);
         *cgw_stream = Some(stream);
 
-        info!("Proxy connection established for client {} to CGW", self.serial);
+        info!(
+            "Proxy connection established for client {} to CGW",
+            self.serial
+        );
         Ok(true)
     }
 

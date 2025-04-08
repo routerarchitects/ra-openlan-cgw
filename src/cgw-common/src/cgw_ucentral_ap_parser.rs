@@ -15,7 +15,7 @@ use crate::{
         CGWUCentralEventStateClientsData, CGWUCentralEventStateClientsType,
         CGWUCentralEventStateLLDPData, CGWUCentralEventStateLinks, CGWUCentralEventStatePort,
         CGWUCentralEventType, CGWUCentralJRPCMessage, CGWUCentralReplyType,
-    }
+    },
 };
 
 fn parse_lldp_data(

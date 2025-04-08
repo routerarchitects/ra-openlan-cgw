@@ -8,11 +8,11 @@ use crate::{
 };
 
 use cgw_common::{
-    cgw_errors::{Error, Result},
     cgw_app_args::{AppArgs, CGWRedisArgs},
-    cgw_tls::cgw_read_root_certs_dir,
     cgw_device::{CGWDevice, CGWDeviceState, CGWDeviceType},
     cgw_devices_cache::CGWDevicesCache,
+    cgw_errors::{Error, Result},
+    cgw_tls::cgw_read_root_certs_dir,
 };
 
 use std::{
@@ -32,10 +32,7 @@ use eui48::MacAddress;
 
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{
-        mpsc::UnboundedReceiver,
-        Mutex, RwLock,
-    },
+    sync::{mpsc::UnboundedReceiver, Mutex, RwLock},
     time::{sleep, Duration},
 };
 
@@ -508,7 +505,10 @@ impl CGWRemoteDiscovery {
         };
 
         if let Err(e) = redis_pubsub_client.subscribe(CGW_REDIS_PUBSUB_TOPIC).await {
-            warn!("Failed to subscribe to REDIS {} topic (channel) - {e}", CGW_REDIS_PUBSUB_TOPIC);
+            warn!(
+                "Failed to subscribe to REDIS {} topic (channel) - {e}",
+                CGW_REDIS_PUBSUB_TOPIC
+            );
         }
 
         /* EO of init pubsub client*/
@@ -2225,10 +2225,7 @@ impl CGWRemoteDiscovery {
         Ok(())
     }
 
-    pub async fn remove_devices_cache_from_redis(
-        &self,
-        infras_list: &Vec<MacAddress>,
-    ) {
+    pub async fn remove_devices_cache_from_redis(&self, infras_list: &Vec<MacAddress>) {
         for infra in infras_list {
             let _ = self.del_device_from_redis_cache(&infra).await;
         }
@@ -2344,35 +2341,6 @@ impl CGWRemoteDiscovery {
         };
 
         Ok(())
-    }
-
-    pub async fn get_device_cache_last_update_timestamp(&self) -> Result<i64> {
-        let mut con = self.redis_infra_cache_client.clone();
-        let key = format!(
-            "{}{}{}",
-            REDIS_KEY_SHARD_ID_PREFIX,
-            self.local_shard_id,
-            REDIS_KEY_SHARD_DEVICE_CACHE_LAST_UPDATE_TIMESTAMP
-        );
-
-        let last_update_timestamp: i64 =
-            match redis::cmd("GET").arg(key).query_async(&mut con).await {
-                Ok(timestamp) => timestamp,
-                Err(e) => {
-                    if e.is_io_error() {
-                        Self::set_redis_health_state_not_ready(e.to_string()).await;
-                    }
-                    error!(
-                        "Failed to get Redis shard {} last update timestamp! Error: {}",
-                        self.local_shard_id, e
-                    );
-                    return Err(Error::RemoteDiscovery(
-                        "Failed to get Redis device cache last update timestamp",
-                    ));
-                }
-            };
-
-        Ok(last_update_timestamp)
     }
 
     pub async fn receive_broadcast_message(&self) -> Option<String> {

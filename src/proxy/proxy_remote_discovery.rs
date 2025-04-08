@@ -1,15 +1,11 @@
 use cgw_common::{
-    cgw_errors::{Error, Result},
     cgw_app_args::{AppArgs, CGWRedisArgs},
-    cgw_tls::cgw_read_root_certs_dir,
     cgw_device::CGWDevice,
+    cgw_errors::{Error, Result},
+    cgw_tls::cgw_read_root_certs_dir,
 };
 
-use std::{
-    collections::HashMap,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use redis::{
     aio::{ConnectionManager, ConnectionManagerConfig},
@@ -18,10 +14,7 @@ use redis::{
 };
 
 use tokio::{
-    sync::{
-        mpsc::UnboundedReceiver,
-        Mutex, RwLock,
-    },
+    sync::{mpsc::UnboundedReceiver, Mutex, RwLock},
     time::{sleep, Duration},
 };
 
@@ -128,7 +121,6 @@ impl From<CGWREDISDBShard> for Vec<String> {
 
 #[derive(Clone)]
 pub struct ProxyRemoteDiscovery {
-    redis_pubsub_client: ConnectionManager,
     redis_pubsub_rx_mbox: Arc<Mutex<UnboundedReceiver<PushInfo>>>,
     redis_client: ConnectionManager,
     redis_infra_cache_client: ConnectionManager,
@@ -140,7 +132,7 @@ pub async fn cgw_create_redis_client(
     redis_args: &CGWRedisArgs,
     protocol: ProtocolVersion,
 ) -> Result<Client> {
-        let redis_client_info = ConnectionInfo {
+    let redis_client_info = ConnectionInfo {
         addr: match redis_args.redis_tls {
             true => redis::ConnectionAddr::TcpTls {
                 host: redis_args.redis_host.clone(),
@@ -194,7 +186,12 @@ impl ProxyRemoteDiscovery {
         );
 
         // Don't really need RESP3 here, RESP3 only needed for pub/sub client.
-        let redis_client = match cgw_create_redis_client(&app_args.redis_args, cgw_redis_default_proto()).await {
+        let redis_client = match cgw_create_redis_client(
+            &app_args.redis_args,
+            cgw_redis_default_proto(),
+        )
+        .await
+        {
             Ok(c) => c,
             Err(e) => {
                 error!(
@@ -223,7 +220,9 @@ impl ProxyRemoteDiscovery {
                             error!(
                                 "Can't create CGW Remote Discovery client after {attempt} attempts! Get Redis async connection failed! Error: {e}"
                             );
-                            return Err(Error::RemoteDiscovery("Redis client create failed after max retries"));
+                            return Err(Error::RemoteDiscovery(
+                                "Redis client create failed after max retries",
+                            ));
                         }
                         warn!("Redis connection attempt {attempt}/{max_retries} failed. Retrying in 1 second... Error: {e}");
 
@@ -293,58 +292,10 @@ impl ProxyRemoteDiscovery {
 
         /* End Redis Infra Cache Client */
 
-
-        /* Start of init pubsub client*/
-
-        // Explicitly request RESP3 here. Needed for underlying push_sender impl.
-        let redis_pubsub_client = match cgw_create_redis_client(
-            &app_args.redis_args,
-            ProtocolVersion::RESP3,
-        )
-        .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                error!(
-                    "Can't create CGW Remote Discovery client! PUB/SUB Redis client create failed! Error: {e}"
-                );
-                return Err(Error::RemoteDiscovery("Redis client create failed"));
-            }
-        };
-
         // Needed for push_sender / receiving messages from subscribed topics.
-        let (channel_tx, channel_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let cfg = ConnectionManagerConfig::new()
-            .set_connection_timeout(Duration::from_secs(10))
-            .set_response_timeout(Duration::from_secs(10))
-            .set_number_of_retries(5)
-            .set_push_sender(channel_tx)
-            .set_automatic_resubscription();
-
-        let mut redis_pubsub_client = match ConnectionManager::new_with_config(
-            redis_pubsub_client,
-            cfg,
-        )
-        .await
-        {
-            Ok(conn) => conn,
-            Err(e) => {
-                error!(
-                    "Can't create CGW Remote Discovery client! Get PUB/SUB Redis async connection failed! Error: {e}"
-                );
-                return Err(Error::RemoteDiscovery("Redis client create failed"));
-            }
-        };
-
-        if let Err(e) = redis_pubsub_client.subscribe(CGW_REDIS_PUBSUB_TOPIC).await {
-            warn!("Failed to subscribe to REDIS {} topic (channel) - {e}", CGW_REDIS_PUBSUB_TOPIC);
-        }
-
-        /* EO of init pubsub client*/
+        let (_, channel_rx) = tokio::sync::mpsc::unbounded_channel();
 
         let rc = ProxyRemoteDiscovery {
-            redis_pubsub_client,
             redis_pubsub_rx_mbox: Arc::new(Mutex::new(channel_rx)),
             redis_client: redis_conn,
             redis_infra_cache_client,
@@ -486,14 +437,19 @@ impl ProxyRemoteDiscovery {
     }
 
     pub async fn get_shard_host_and_wss_port(&self, shard_id: i32) -> Result<(String, u16)> {
-        debug!("Getting shard host and server port for shard ID: {}", shard_id);
+        debug!(
+            "Getting shard host and server port for shard ID: {}",
+            shard_id
+        );
 
         // First try with current data
         let lock = self.remote_cgws_map.read().await;
 
         if let Some(instance) = lock.get(&shard_id) {
-            debug!("Found shard {}: host={}, wss_port={}",
-                   shard_id, instance.server_host, instance.wss_port);
+            debug!(
+                "Found shard {}: host={}, wss_port={}",
+                shard_id, instance.server_host, instance.wss_port
+            );
             return Ok((instance.server_host.clone(), instance.wss_port));
         }
 
@@ -507,8 +463,10 @@ impl ProxyRemoteDiscovery {
         let lock = self.remote_cgws_map.read().await;
 
         if let Some(instance) = lock.get(&shard_id) {
-            debug!("Found shard {}: host={}, wss_port={}",
-                   shard_id, instance.server_host, instance.wss_port);
+            debug!(
+                "Found shard {}: host={}, wss_port={}",
+                shard_id, instance.server_host, instance.wss_port
+            );
             return Ok((instance.server_host.clone(), instance.wss_port));
         }
 
@@ -538,9 +496,7 @@ impl ProxyRemoteDiscovery {
 
         if redis_keys.is_empty() {
             debug!("No device entry found in Redis for MAC: {}", infra);
-            return Err(Error::RemoteDiscovery(
-                "No device entry found",
-            ));
+            return Err(Error::RemoteDiscovery("No device entry found"));
         }
 
         let device_str: String = match redis::cmd("GET")
@@ -550,9 +506,7 @@ impl ProxyRemoteDiscovery {
         {
             Ok(dev) => dev,
             Err(e) => {
-                error!(
-                    "Failed to get device cache from Redis, Error: {}", e
-                );
+                error!("Failed to get device cache from Redis, Error: {}", e);
                 return Err(Error::RemoteDiscovery(
                     "Failed to get device cache from Redis",
                 ));
@@ -580,18 +534,14 @@ impl ProxyRemoteDiscovery {
             Some(mac) => match MacAddress::from_str(mac) {
                 Ok(mac_address) => mac_address,
                 Err(e) => {
-                    error!(
-                        "Failed to parse device mac address from key! Error: {}", e
-                    );
+                    error!("Failed to parse device mac address from key! Error: {}", e);
                     return Err(Error::RemoteDiscovery(
                         "Failed to parse device mac address from key",
                     ));
                 }
             },
             None => {
-                error!(
-                    "Failed to get device mac address from key !"
-                );
+                error!("Failed to get device mac address from key !");
                 return Err(Error::RemoteDiscovery(
                     "Failed to get device mac address from key",
                 ));
@@ -599,9 +549,7 @@ impl ProxyRemoteDiscovery {
         };
 
         match serde_json::from_str(&device_str) {
-            Ok(dev) => {
-                Ok((dev, infra))
-            }
+            Ok(dev) => Ok((dev, infra)),
             Err(e) => {
                 error!("Failed to deserialize device from Redis cache! Error: {e}");
                 Err(Error::RemoteDiscovery(
@@ -647,7 +595,11 @@ impl ProxyRemoteDiscovery {
 
         // Sort the CGW IDs for consistent round-robin selection
         available_cgws.sort();
-        debug!("Found {} available CGW IDs: {:?}", available_cgws.len(), available_cgws);
+        debug!(
+            "Found {} available CGW IDs: {:?}",
+            available_cgws.len(),
+            available_cgws
+        );
 
         Ok(available_cgws)
     }

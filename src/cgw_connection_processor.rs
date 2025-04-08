@@ -14,12 +14,12 @@ use crate::{
 };
 
 use cgw_common::{
+    cgw_device::{CGWDeviceCapabilities, CGWDeviceType},
     cgw_errors::{Error, Result},
     cgw_ucentral_parser::{
-        cgw_ucentral_event_parse, cgw_ucentral_parse_connect_event, cgw_proxy_parse_connect_event,
+        cgw_proxy_parse_connect_event, cgw_ucentral_event_parse, cgw_ucentral_parse_connect_event,
         CGWUCentralCommandType, CGWUCentralEventType, CGWUCentralReplyType,
     },
-    cgw_device::{CGWDeviceCapabilities, CGWDeviceType},
 };
 
 use eui48::MacAddress;
@@ -32,9 +32,9 @@ use uuid::Uuid;
 
 use std::{net::SocketAddr, str::FromStr, sync::Arc};
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     sync::mpsc::{unbounded_channel, UnboundedReceiver},
     time::{sleep, Duration, Instant},
-    io::{AsyncRead, AsyncWrite},
 };
 use tokio_tungstenite::{tungstenite::protocol::Message, WebSocketStream};
 use tungstenite::Message::{Close, Ping, Text};
@@ -156,7 +156,7 @@ impl CGWConnectionProcessor {
                         // Set self.addr using the peer_address from the proxy event
                         self.addr = proxy_event.peer_address;
                         self.serial = proxy_event.serial;
-                    },
+                    }
                     Err(e) => {
                         warn!("Failed to parse proxy connect event: {}", e);
                     }
@@ -754,8 +754,7 @@ impl CGWConnectionProcessor {
         mut stream: SStream<S>,
         mut sink: SSink<S>,
         mut mbox_rx: UnboundedReceiver<CGWConnectionProcessorReqMsg>,
-    )
-    where
+    ) where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         #[derive(Debug)]

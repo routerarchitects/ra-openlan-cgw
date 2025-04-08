@@ -22,7 +22,8 @@ pub enum ProxyRuntimeType {
 }
 
 lazy_static! {
-    static ref RUNTIMES: Mutex<HashMap<ProxyRuntimeType, Arc<Runtime>>> = Mutex::new(HashMap::new());
+    static ref RUNTIMES: Mutex<HashMap<ProxyRuntimeType, Arc<Runtime>>> =
+        Mutex::new(HashMap::new());
 }
 
 pub fn proxy_initialize_runtimes(wss_t_num: usize) -> Result<()> {

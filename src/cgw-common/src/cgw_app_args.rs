@@ -5,9 +5,9 @@ use std::{
     str::FromStr,
 };
 
-use url::Url;
 use crate::cgw_errors::{Error, Result};
 use crate::AppCoreLogLevel;
+use url::Url;
 
 const CGW_DEFAULT_ID: i32 = 0;
 const CGW_DEFAULT_GROUPS_CAPACITY: i32 = 1000;

@@ -1,16 +1,11 @@
 use cgw_common::{
-    cgw_errors::{Error, Result},
-    cgw_tls::cgw_tls_get_cn_from_stream,
     cgw_app_args::AppArgs,
     cgw_device::CGWDevice,
+    cgw_errors::{Error, Result},
+    cgw_tls::cgw_tls_get_cn_from_stream,
 };
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-    sync::Mutex,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::{
     net::TcpStream,
     runtime::Runtime,
@@ -26,18 +21,16 @@ use eui48::MacAddress;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    proxy_runtime::{proxy_get_runtime, ProxyRuntimeType},
-    proxy_connection_processor::{
-        ProxyConnectionProcessor,
-        ProxyConnectionProcessorReqMsg,
-    },
+    proxy_connection_processor::{ProxyConnectionProcessor, ProxyConnectionProcessorReqMsg},
     proxy_remote_discovery::ProxyRemoteDiscovery,
+    proxy_runtime::{proxy_get_runtime, ProxyRuntimeType},
 };
 
 use lazy_static::lazy_static;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 lazy_static! {
-    static ref LAST_CGW_INDEX: Mutex<usize> = Mutex::new(0);
+    static ref LAST_CGW_INDEX: AtomicUsize = AtomicUsize::new(0);
 }
 
 #[derive(Debug, Clone)]
@@ -71,15 +64,13 @@ type ProxyConnectionServerMboxTx = UnboundedSender<ProxyConnectionServerReqMsg>;
 #[derive(Debug)]
 pub enum ProxyConnectionServerReqMsg {
     // Connection-related messages
-    AddNewConnection(
-        MacAddress,
-        UnboundedSender<ProxyConnectionProcessorReqMsg>,
-    ),
+    AddNewConnection(MacAddress, UnboundedSender<ProxyConnectionProcessorReqMsg>),
     ConnectionClosed(MacAddress),
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
 pub enum CGWBroadcastMessageType {
+    GidAdded(i32),
     GidRemoved(i32, Option<Vec<MacAddress>>),
     InfraListAssigned(i32, Vec<MacAddress>),
     InfraListDeassigned(i32, Vec<MacAddress>),
@@ -111,16 +102,34 @@ impl CGWBroadcastMessage {
 
         // TODO: Wasting mem? Optimize?
         match self.msg_type.clone() {
+            CGWBroadcastMessageType::GidAdded(_owner_shard_id) => {
+                self.handle_infrastructure_group_added(server, _owner_shard_id)
+                    .await;
+            }
             CGWBroadcastMessageType::GidRemoved(_owner_shard_id, affected_ifnras_list) => {
-                self.handle_infrastructure_group_removed(affected_ifnras_list, server).await;
+                self.handle_infrastructure_group_removed(affected_ifnras_list, server)
+                    .await;
             }
             CGWBroadcastMessageType::InfraListAssigned(owner_shard_id, affected_ifnras_list) => {
-                self.handle_infras_list_assigned(owner_shard_id, affected_ifnras_list, server).await;
+                self.handle_infras_list_assigned(owner_shard_id, affected_ifnras_list, server)
+                    .await;
             }
             CGWBroadcastMessageType::InfraListDeassigned(_owner_shard_id, affected_ifnras_list) => {
-                self.handle_infras_list_deassigned(affected_ifnras_list, server).await;
+                self.handle_infras_list_deassigned(affected_ifnras_list, server)
+                    .await;
             }
         }
+    }
+
+    async fn handle_infrastructure_group_added(
+        &self,
+        server: Arc<ProxyConnectionServer>,
+        _owner_shard_id: i32,
+    ) {
+        debug!("handle_infrastructure_group_added entry {:?}", self);
+        // New group added, all we can do is make sure
+        // we've synced GID to CGW map;
+        let _ = server.proxy_remote_discovery.sync_gid_to_cgw_map().await;
     }
 
     async fn handle_infrastructure_group_removed(
@@ -166,10 +175,16 @@ impl CGWBroadcastMessage {
         }
 
         for mac in devices_to_update {
-            if let Err(e) = server.set_peer_connection(&mac, owner_shard_id, self.gid).await {
+            if let Err(e) = server
+                .set_peer_connection(&mac, owner_shard_id, self.gid)
+                .await
+            {
                 error!("Failed to set peer for device {}: {}", mac, e);
             } else {
-                debug!("Assigned device {} to group {} on CGW {}", mac, self.gid, owner_shard_id);
+                debug!(
+                    "Assigned device {} to group {} on CGW {}",
+                    mac, self.gid, owner_shard_id
+                );
             }
         }
     }
@@ -197,15 +212,22 @@ impl CGWBroadcastMessage {
                         // Only deassign if we have a CGW ID
                         if let Some(cgw_id) = conn_info.connected_to_cgw_id {
                             debug!(
-                                "Deassigning device {} from group {}", mac, conn_info.connected_to_group_id
+                                "Deassigning device {} from group {}",
+                                mac, conn_info.connected_to_group_id
                             );
                             devices_to_deassign.push((mac.clone(), cgw_id));
                         }
                     } else {
-                        warn!("Unexpected: received infra deassign for unassigned group {}", mac);
+                        warn!(
+                            "Unexpected: received infra deassign for unassigned group {}",
+                            mac
+                        );
                     }
                 } else {
-                    debug!("Received deassignment for device {} not in connection map", mac);
+                    debug!(
+                        "Received deassignment for device {} not in connection map",
+                        mac
+                    );
                 }
             }
         }
@@ -333,10 +355,7 @@ impl ProxyConnectionServer {
             };
 
             let conn_processor = ProxyConnectionProcessor::new(server_clone, addr);
-            if let Err(e) = conn_processor
-                .start(tls_stream, client_cn)
-                .await
-            {
+            if let Err(e) = conn_processor.start(tls_stream, client_cn).await {
                 error!("Failed to start connection processor! Error: {e}");
             }
         });
@@ -363,8 +382,10 @@ impl ProxyConnectionServer {
                 //     NB messages has to be made based on the most actual data
                 //     available - redis cache synced, dev cache is up to date,
                 //     remote mapping is the latest.
-                if let Some(bcast_msg) =
-                    self.proxy_remote_discovery.receive_broadcast_message().await
+                if let Some(bcast_msg) = self
+                    .proxy_remote_discovery
+                    .receive_broadcast_message()
+                    .await
                 {
                     let msg: CGWBroadcastMessage = match serde_json::from_str(&bcast_msg) {
                         Ok(m) => m,
@@ -414,14 +435,16 @@ impl ProxyConnectionServer {
                 let should_sync = !devices_to_sync.read().await.is_empty();
                 if should_sync {
                     let devices_count = devices_to_sync.read().await.len();
-                    info!("Starting to manage {} device connections", devices_count);
+                    debug!("Starting to manage {} device connections", devices_count);
 
                     let start_time = std::time::Instant::now();
                     let _ = self.manage_device_connections(&devices_to_sync).await;
                     let elapsed = start_time.elapsed();
 
-                    info!("Exited manage_device_connections, took {:?}, managed {} devices",
-                          elapsed, devices_count);
+                    debug!(
+                        "Exited manage_device_connections, took {:?}, managed {} devices",
+                        elapsed, devices_count
+                    );
                 }
 
                 *last_sync_timestamp.write().await = now;
@@ -490,7 +513,8 @@ impl ProxyConnectionServer {
                     // Add device to the vec for next sync cycle
                     devices_to_sync.write().await.push(device_mac.clone());
 
-                    let msg: ProxyConnectionProcessorReqMsg = ProxyConnectionProcessorReqMsg::AddNewConnectionAck;
+                    let msg: ProxyConnectionProcessorReqMsg =
+                        ProxyConnectionProcessorReqMsg::AddNewConnectionAck;
 
                     if let Err(e) = conn_processor_mbox_tx_clone.send(msg) {
                         error!("Failed to send NewConnection message! Error: {e}");
@@ -501,7 +525,10 @@ impl ProxyConnectionServer {
                             connected_to_group_id: 0,
                         };
 
-                        debug!("Device {} connected, pending group assignment", device_mac_clone);
+                        debug!(
+                            "Device {} connected, pending group assignment",
+                            device_mac_clone
+                        );
                         connmap_w_lock.insert(device_mac_clone, updated_con_info);
                     }
                 } else if let ProxyConnectionServerReqMsg::ConnectionClosed(device_mac) = msg {
@@ -520,10 +547,18 @@ impl ProxyConnectionServer {
                                 device_mac,
                                 connmap_w_lock.len() - 1
                             );
+
                             connmap_w_lock.remove(&device_mac);
+
+                            // Also remove the device from devices_to_sync
+                            let mut sync_devices = devices_to_sync.write().await;
+                            sync_devices.retain(|mac| *mac != device_mac);
                         }
                     } else {
-                        debug!("Received ConnectionClosed for unknown device: {}", device_mac);
+                        debug!(
+                            "Received ConnectionClosed for unknown device: {}",
+                            device_mac
+                        );
                     }
                 }
             }
@@ -533,7 +568,10 @@ impl ProxyConnectionServer {
         }
     }
 
-    async fn manage_device_connections(self: &Arc<Self>, devices_to_sync: &Arc<RwLock<Vec<MacAddress>>>) -> Result<()> {
+    async fn manage_device_connections(
+        self: &Arc<Self>,
+        devices_to_sync: &Arc<RwLock<Vec<MacAddress>>>,
+    ) -> Result<()> {
         // Get the list of devices to process
         let devices_to_process = {
             let devices_read = devices_to_sync.read().await;
@@ -543,7 +581,7 @@ impl ProxyConnectionServer {
             devices_read.clone()
         };
 
-        info!("Managing {} device connections", devices_to_process.len());
+        debug!("Managing {} device connections", devices_to_process.len());
 
         // Track which devices to remove
         let mut devices_to_remove = Vec::new();
@@ -553,25 +591,29 @@ impl ProxyConnectionServer {
 
         for mac in &devices_to_process {
             debug!("processing {mac}");
-            if let Some(conn_info) = connmap_r_lock.get(mac) {
-                // We found the device in the connection map, add it to removal list
-                devices_to_remove.push(*mac);
 
+            if let Some(conn_info) = connmap_r_lock.get(mac) {
                 let mac_clone = mac.clone();
                 let conn_info_clone = conn_info.clone();
                 let self_clone = self.clone();
 
                 let task = self.wss_rx_tx_runtime.spawn(async move {
                     debug!("<internal task> processing {mac_clone}");
-                    let device_result = self_clone.proxy_remote_discovery.get_single_device_cache_with_redis(mac_clone).await;
+                    let device_result = self_clone
+                        .proxy_remote_discovery
+                        .get_single_device_cache_with_redis(mac_clone)
+                        .await;
                     let cgw_group_owner_id: Option<i32>;
 
                     let device = match device_result {
                         Ok((device, _)) => {
                             let device_group_id = device.get_device_group_id();
-                            cgw_group_owner_id = self_clone.proxy_remote_discovery.get_infra_group_owner_id(device_group_id).await;
+                            cgw_group_owner_id = self_clone
+                                .proxy_remote_discovery
+                                .get_infra_group_owner_id(device_group_id)
+                                .await;
                             Some(device)
-                        },
+                        }
                         Err(e) => {
                             error!("Failed to sync device {} with Redis: {}", mac_clone, e);
                             cgw_group_owner_id = None;
@@ -579,18 +621,22 @@ impl ProxyConnectionServer {
                         }
                     };
 
-                    if conn_info_clone.connected_to_group_id == 0 {
-                        let _ = self_clone.manage_unassigned_connection(&mac_clone, device, cgw_group_owner_id).await;
+                    let result = if conn_info_clone.connected_to_group_id == 0 {
+                        self_clone
+                            .manage_unassigned_connection(&mac_clone, device, cgw_group_owner_id)
+                            .await
                     } else {
-                        let _ = self_clone.manage_assigned_connection(&mac_clone, device, cgw_group_owner_id).await;
-                    }
-                    debug!("END of <internal task> processing {mac_clone}");
+                        self_clone
+                            .manage_assigned_connection(&mac_clone, device, cgw_group_owner_id)
+                            .await
+                    };
+
+                    (mac_clone, result)
                 });
 
                 tasks.push(task);
             } else {
                 debug!("Device {} not found in connection map during sync", mac);
-                // Don't add to devices_to_remove, so it will be retried on the next tick
                 devices_to_remove.push(*mac);
             }
         }
@@ -598,8 +644,18 @@ impl ProxyConnectionServer {
         drop(connmap_r_lock);
 
         for task in tasks {
-            if let Err(e) = task.await {
-                error!("Task joined with error: {}", e);
+            match task.await {
+                Ok((mac, result)) => {
+                    if result.is_ok() {
+                        devices_to_remove.push(mac);
+                        debug!("{} processed", mac);
+                    } else {
+                        debug!("{} was not processed", mac);
+                    }
+                }
+                Err(e) => {
+                    error!("Task joined with error: {}", e);
+                }
             }
         }
 
@@ -622,14 +678,24 @@ impl ProxyConnectionServer {
             // Device in cache
             let device_group_id = cached_device.get_device_group_id();
             if let Some(owner_id) = cgw_group_owner_id {
-                if let Err(e) = self.set_peer_connection(mac, owner_id, device_group_id).await {
+                if let Err(e) = self
+                    .set_peer_connection(mac, owner_id, device_group_id)
+                    .await
+                {
                     error!("Failed to set peer for device {}: {}", mac, e);
-                    return Ok(());
+                    return Err(Error::ConnectionServer(format!(
+                        "Failed to set peer for device {}: {}",
+                        mac, e
+                    )));
                 }
-                debug!("Assigned device {} to group {} on CGW {}", mac, device_group_id, owner_id);
+                debug!(
+                    "Assigned device {} to group {} on CGW {}",
+                    mac, device_group_id, owner_id
+                );
             } else {
                 // Unexpected: cgw_group_owner_id is not assigned
-                error!("Unexpected: unassigned connection: cgw_group_owner_id is not assigned");
+                warn!("Unexpected: unassigned connection: cgw_group_owner_id is not assigned for mac {} and group id: {}",
+                        mac, device_group_id);
             }
         } else {
             // Device is not in cache
@@ -637,20 +703,28 @@ impl ProxyConnectionServer {
                 Ok(round_robin_cgw_id) => {
                     if let Err(e) = self.set_peer_connection(mac, round_robin_cgw_id, 0).await {
                         error!("Failed to set round-robin peer for device {}: {}", mac, e);
-                        return Ok(());
+                        return Err(Error::ConnectionServer(format!(
+                            "Failed to set round-robin peer for device {}: {}",
+                            mac, e
+                        )));
                     }
-                    debug!("Assigned unregistered device {} to round-robin CGW {}", mac, round_robin_cgw_id);
-                },
+                    debug!(
+                        "Assigned unregistered device {} to round-robin CGW {}",
+                        mac, round_robin_cgw_id
+                    );
+                }
                 Err(e) => {
-                    error!("Failed to get round-robin CGW ID: {}", e);
+                    return Err(Error::ConnectionServer(format!(
+                        "Failed to get round-robin CGW ID: {} Error: {}",
+                        mac, e
+                    )));
                 }
             }
-            debug!("Unassigned connection done! Device was not in cache");
+            debug!("Unassigned connection done! {} was not in cache", mac);
         }
 
         Ok(())
     }
-
 
     async fn manage_assigned_connection(
         self: &Arc<Self>,
@@ -659,16 +733,26 @@ impl ProxyConnectionServer {
         cgw_group_owner_id: Option<i32>,
     ) -> Result<()> {
         if let Some(cached_device) = device {
+            let device_group_id = cached_device.get_device_group_id();
             // Device exists in cache
             if let Some(owner_id) = cgw_group_owner_id {
-                let device_group_id = cached_device.get_device_group_id();
-                if let Err(e) = self.set_peer_connection(mac, owner_id, device_group_id).await {
-                    error!("Failed to update peer for device {} with new group {}: {}", mac, device_group_id, e);
-                    return Ok(());
+                if let Err(e) = self
+                    .set_peer_connection(mac, owner_id, device_group_id)
+                    .await
+                {
+                    error!(
+                        "Failed to update peer for device {} with new group {}: {}",
+                        mac, device_group_id, e
+                    );
+                    return Err(Error::ConnectionServer(format!(
+                        "Failed to update peer for device {} with new group {}: {}",
+                        mac, device_group_id, e
+                    )));
                 }
             } else {
                 // Unexpected: cgw_group_owner_id is not assigned
-                error!("Unexpected: assigned connection: cgw_group_owner_id is not assigned");
+                warn!("Unexpected: assigned connection: cgw_group_owner_id is not assigned for mac {} and group id: {}",
+                        mac, device_group_id);
             }
         } else {
             // Unexpected: Device not in cache
@@ -678,15 +762,25 @@ impl ProxyConnectionServer {
                     // Set peer connection
                     if let Err(e) = self.set_peer_connection(mac, round_robin_cgw_id, 0).await {
                         error!("Failed to reset peer for removed device {}: {}", mac, e);
-                        return Ok(());
+                        return Err(Error::ConnectionServer(format!(
+                            "Failed to reset peer for removed device {}: {}",
+                            mac, e
+                        )));
                     }
-                    debug!("Device {} not in cache, assigned to round-robin CGW {}", mac, round_robin_cgw_id);
-                },
+                    debug!(
+                        "Device {} not in cache, assigned to round-robin CGW {}",
+                        mac, round_robin_cgw_id
+                    );
+                }
                 Err(e) => {
-                    error!("Failed to get round-robin CGW ID: {}", e);
+                    error!("Failed to get round-robin CGW ID: {} Error: {}", mac, e);
+                    return Err(Error::ConnectionServer(format!(
+                        "Failed to get round-robin CGW ID: {} Error: {}",
+                        mac, e
+                    )));
                 }
             }
-            debug!("Unexpected: assigned connection: device is not in cache");
+            warn!("Unexpected: assigned connection: {} is not in cache", mac);
         }
 
         Ok(())
@@ -710,16 +804,25 @@ impl ProxyConnectionServer {
         } else {
             debug!("Device {} not found in connection map", mac);
             return Err(Error::ConnectionServer(format!(
-                "Device {} not found in connection map", mac
+                "Device {} not found in connection map",
+                mac
             )));
         };
 
-        if conn_info.connected_to_cgw_id == Some(cgw_id) && conn_info.connected_to_group_id == group_id {
-            debug!("Noting to do: set_peer_connection, cgw_id: {}, group_id: {}", cgw_id, group_id);
+        if conn_info.connected_to_cgw_id == Some(cgw_id)
+            && conn_info.connected_to_group_id == group_id
+        {
+            debug!(
+                "Noting to do: set_peer_connection, cgw_id: {}, group_id: {}",
+                cgw_id, group_id
+            );
             return Ok(());
         }
 
-        debug!("set_peer_connection, cgw_id: {}, group_id: {}", cgw_id, group_id);
+        debug!(
+            "set_peer_connection, cgw_id: {}, group_id: {}",
+            cgw_id, group_id
+        );
 
         conn_info.connected_to_cgw_id = Some(cgw_id);
         conn_info.connected_to_group_id = group_id;
@@ -730,21 +833,30 @@ impl ProxyConnectionServer {
         drop(connmap_w_lock);
 
         // Get the socket address for the CGW instance
-        let (host, port) = match self.proxy_remote_discovery.get_shard_host_and_wss_port(cgw_id).await {
+        let (host, port) = match self
+            .proxy_remote_discovery
+            .get_shard_host_and_wss_port(cgw_id)
+            .await
+        {
             Ok((host, port)) => (host, port),
             Err(e) => {
                 error!("Failed to get peer address for device {}: {}", mac_clone, e);
                 return Err(Error::ConnectionServer(format!(
-                    "Failed to get peer address for device {}: {}", mac_clone, e
+                    "Failed to get peer address for device {}: {}",
+                    mac_clone, e
                 )));
             }
         };
 
         let peer_msg = ProxyConnectionProcessorReqMsg::SetPeer(format!("{}:{}", host, port));
         if let Err(e) = mbox_tx.send(peer_msg) {
-            error!("Failed to send ConnectToPeer message for device {}: {}", mac_clone, e);
+            error!(
+                "Failed to send ConnectToPeer message for device {}: {}",
+                mac_clone, e
+            );
             return Err(Error::ConnectionServer(format!(
-                "Failed to send ConnectToPeer message for device {}: {}", mac_clone, e
+                "Failed to send ConnectToPeer message for device {}: {}",
+                mac_clone, e
             )));
         }
 
@@ -756,26 +868,29 @@ impl ProxyConnectionServer {
             Ok(ids) => ids,
             Err(e) => {
                 return Err(Error::ConnectionServer(format!(
-                    "Failed to get available CGW IDs: {}", e
+                    "Failed to get available CGW IDs: {}",
+                    e
                 )));
             }
         };
 
         if available_cgw_ids.is_empty() {
             return Err(Error::ConnectionServer(
-                "No available CGW IDs for round-robin assignment".to_string()
+                "No available CGW IDs for round-robin assignment".to_string(),
             ));
         }
 
-        let index = {
-            let mut last_index = LAST_CGW_INDEX.lock().unwrap();
-            let current = *last_index;
-            // Update for next time
-            *last_index = (current + 1) % available_cgw_ids.len();
-            current
-        };
+        let current = LAST_CGW_INDEX.load(Ordering::SeqCst);
+        let next_index = (current + 1) % available_cgw_ids.len();
 
-        debug!("Selected CGW ID {} for round-robin (index {})", available_cgw_ids[index], index);
+        LAST_CGW_INDEX.store(next_index, Ordering::SeqCst);
+
+        let index = current % available_cgw_ids.len();
+
+        debug!(
+            "Selected CGW ID {} for round-robin (index {})",
+            available_cgw_ids[index], index
+        );
 
         Ok(available_cgw_ids[index])
     }

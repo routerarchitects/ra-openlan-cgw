@@ -1,8 +1,8 @@
 #![warn(rust_2018_idioms)]
 mod proxy_connection_processor;
 mod proxy_connection_server;
-mod proxy_runtime;
 mod proxy_remote_discovery;
+mod proxy_runtime;
 
 #[macro_use]
 extern crate log;
@@ -22,12 +22,11 @@ use proxy_connection_server::ProxyConnectionServer;
 use proxy_runtime::proxy_initialize_runtimes;
 
 use cgw_common::{
-    cgw_errors::{Error, Result},
     cgw_app_args::AppArgs,
-    AppCoreLogLevel,
-    cgw_tls::cgw_tls_create_acceptor,
-    signal_handler,
+    cgw_errors::{Error, Result},
     cgw_set_tcp_keepalive_options,
+    cgw_tls::cgw_tls_create_acceptor,
+    signal_handler, AppCoreLogLevel,
 };
 
 pub struct AppCore {
@@ -203,7 +202,9 @@ async fn main() -> Result<()> {
         }
     };
 
-    tokio_rustls::rustls::crypto::ring::default_provider().install_default().expect("Failed to install rustls crypto provider");
+    tokio_rustls::rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
 
     // Configure logger
     setup_logger(args.log_level);

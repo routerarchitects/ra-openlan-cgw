@@ -10,11 +10,11 @@ use crate::{
 };
 
 use cgw_common::{
-    cgw_ucentral_parser::{
-    CGWUCentralEvent, CGWUCentralEventRealtimeEventType, CGWUCentralEventStateClientsType,
-    CGWUCentralEventStatePort, CGWUCentralEventType,
-    },
     cgw_device::CGWDeviceType,
+    cgw_ucentral_parser::{
+        CGWUCentralEvent, CGWUCentralEventRealtimeEventType, CGWUCentralEventStateClientsType,
+        CGWUCentralEventStatePort, CGWUCentralEventType,
+    },
 };
 
 use tokio::{

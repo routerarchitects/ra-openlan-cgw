@@ -1,21 +1,17 @@
-pub mod cgw_errors;
 pub mod cgw_app_args;
-pub mod cgw_tls;
 pub mod cgw_device;
 pub mod cgw_devices_cache;
-pub mod cgw_ucentral_parser;
+pub mod cgw_errors;
+pub mod cgw_tls;
 pub mod cgw_ucentral_ap_parser;
+pub mod cgw_ucentral_parser;
 pub mod cgw_ucentral_switch_parser;
 
+use nix::sys::socket::{setsockopt, sockopt};
+use std::os::unix::io::AsFd;
 use std::str::FromStr;
 use std::sync::Arc;
-use nix::sys::socket::{setsockopt, sockopt};
-use tokio::{
-    signal,
-    sync::Notify,
-    net::TcpStream,
-};
-use std::os::unix::io::AsFd;
+use tokio::{net::TcpStream, signal, sync::Notify};
 
 use cgw_errors::{Error, Result};
 
