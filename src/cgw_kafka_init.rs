@@ -1,14 +1,16 @@
-use crate::cgw_app_args::{CGWKafkaArgs, CGWRedisArgs};
-use crate::cgw_errors::{Error, Result};
-use crate::cgw_remote_discovery::cgw_create_redis_client;
+use cgw_common::{
+    cgw_app_args::{CGWKafkaArgs, CGWRedisArgs},
+    cgw_errors::{Error, Result},
+    cgw_tls::CGW_TLS_NB_INFRA_CERTS_PATH,
+};
+
+use crate::cgw_remote_discovery::{cgw_create_redis_client, cgw_redis_default_proto};
 
 use rdkafka::admin::{AdminClient, AdminOptions, NewPartitions, NewTopic, TopicReplication};
 use rdkafka::client::DefaultClientContext;
 use rdkafka::config::ClientConfig;
 
 use std::time::Duration;
-
-use crate::cgw_tls::CGW_TLS_NB_INFRA_CERTS_PATH;
 
 const CGW_KAFKA_TOPICS_LIST: [&str; 6] = [
     "cnc",
@@ -20,7 +22,7 @@ const CGW_KAFKA_TOPICS_LIST: [&str; 6] = [
 ];
 
 async fn cgw_get_active_cgw_number(redis_args: &CGWRedisArgs) -> Result<usize> {
-    let redis_client = match cgw_create_redis_client(redis_args).await {
+    let redis_client = match cgw_create_redis_client(redis_args, cgw_redis_default_proto()).await {
         Ok(client) => client,
         Err(e) => {
             return Err(Error::KafkaInit(format!(

@@ -1,6 +1,7 @@
 import pytest
 import json
 import random
+import time
 
 from metrics import cgw_metrics_get_connections_num, \
     cgw_metrics_get_groups_assigned_num, \
@@ -98,6 +99,8 @@ class TestCgwBasic:
                 infra_is_unassigned = True
                 continue
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         assert cgw_metrics_get_connections_num() == 1
 
         assert (join_message_received == False), \

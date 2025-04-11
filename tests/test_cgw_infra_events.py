@@ -79,6 +79,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -352,6 +354,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -625,6 +629,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -898,6 +904,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -1171,6 +1179,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -1444,6 +1454,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -1717,6 +1729,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -1990,6 +2004,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -2263,6 +2279,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -2537,6 +2555,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -2810,6 +2830,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -3008,6 +3030,9 @@ class TestCgwInfraEvents:
             group_id)
         assert group_info_redis == {}
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
+
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 0
@@ -3083,6 +3108,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -3356,6 +3383,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -3630,6 +3659,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -3973,6 +4004,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -4258,6 +4291,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -4440,6 +4475,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 0
@@ -4448,6 +4485,8 @@ class TestCgwInfraEvents:
         test_context.device_sim.connect()
         test_context.device_sim.send_hello(test_context.device_sim._socket)
 
+        # Simulate at least 2 sec sleep before checking metrics
+        time.sleep(2)
         # Get message from Kafka
         # Expected to get 2 events
         # 1. Unassigned Infra Join
@@ -4515,6 +4554,8 @@ class TestCgwInfraEvents:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -4627,8 +4668,8 @@ class TestCgwInfraEvents:
         test_context.device_sim.connect()
         test_context.device_sim.send_hello(test_context.device_sim._socket)
 
-        # Simulate at least 1 sec sleep before checking metrics
-        time.sleep(1)
+        # Simulate at least 2 sec sleep before checking metrics
+        time.sleep(2)
         assert cgw_metrics_get_connections_num() == 1
         assert test_context.device_sim._socket is not None, \
             f"Expected websocket connection NOT to be NULL after reconnect."

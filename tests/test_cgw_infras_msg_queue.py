@@ -28,11 +28,11 @@ class TestCgwInfrasMsgQueue:
         assert test_context.kafka_consumer.is_connected(), \
             f'Kafka consumer is not connected to Kafka'
 
-        # Simulate at least 1 sec sleep before checking metrics
+        # Simulate at least 2 sec sleep before checking metrics
         # Without it, tests sometimes can fail
         # NOTE: more complex tests might avoid waiting
         # by making sure to wait / recv the infra_join msg.
-        time.sleep(1)
+        time.sleep(2)
 
         assert cgw_metrics_get_active_shards_num() >= 1
         assert cgw_metrics_get_connections_num() == 1
@@ -42,6 +42,8 @@ class TestCgwInfrasMsgQueue:
             print(f'Failed to get shard 0 info from Redis!')
             raise Exception('Failed to get shard 0 info from Redis!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
 
@@ -96,8 +98,8 @@ class TestCgwInfrasMsgQueue:
         test_context.device_sim.connect()
         test_context.device_sim.send_hello(test_context.device_sim._socket)
 
-        # Simulate at least 1 sec sleep before checking metrics
-        time.sleep(1)
+        # Simulate at least 2 sec sleep before checking metrics
+        time.sleep(2)
         assert cgw_metrics_get_connections_num() == 1
         assert test_context.device_sim._socket is not None, \
             f"Expected websocket connection NOT to be NULL after reconnect."
@@ -172,6 +174,8 @@ class TestCgwInfrasMsgQueue:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1

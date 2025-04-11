@@ -1,6 +1,5 @@
 use crate::{
     cgw_connection_server::CGWConnectionServer,
-    cgw_device::CGWDeviceType,
     cgw_nb_api_listener::{
         cgw_construct_client_join_msg, cgw_construct_client_leave_msg,
         cgw_construct_client_migrate_msg, cgw_construct_cloud_header,
@@ -8,6 +7,10 @@ use crate::{
         cgw_construct_ucentral_topomap_infra_leave_msg, cgw_get_timestamp_16_digits,
         CGWKafkaProducerTopic,
     },
+};
+
+use cgw_common::{
+    cgw_device::CGWDeviceType,
     cgw_ucentral_parser::{
         CGWUCentralEvent, CGWUCentralEventRealtimeEventType, CGWUCentralEventStateClientsType,
         CGWUCentralEventStatePort, CGWUCentralEventType,

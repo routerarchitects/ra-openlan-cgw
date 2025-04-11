@@ -2,6 +2,7 @@ import pytest
 import uuid
 import random
 from randmac import RandMac
+import time
 
 from metrics import cgw_metrics_get_groups_assigned_num, \
     cgw_metrics_get_group_infras_assigned_num, \
@@ -80,6 +81,8 @@ class TestCgwInfra:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -430,6 +433,8 @@ class TestCgwInfra:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -589,6 +594,8 @@ class TestCgwInfra:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -829,6 +836,8 @@ class TestCgwInfra:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1
@@ -1138,6 +1147,8 @@ class TestCgwInfra:
             raise Exception(
                 f'Failed to get shard {default_shard_id} info from Redis!')
 
+        # Simulate at least 1 sec sleep before checking metrics
+        time.sleep(1)
         # Validate number of assigned groups
         assert int(shard_info.get('assigned_groups_num')
                    ) == cgw_metrics_get_groups_assigned_num() == 1

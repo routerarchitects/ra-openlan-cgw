@@ -178,12 +178,34 @@ class Device:
         self.send_hello(self._socket)
 
     def connect(self):
-        if self._socket is None:
-            # 20 seconds is more then enough to establish connection and exchange
-            # them handshakes.
-            self._socket = client.connect(
-                self.server_addr, ssl=self.ssl_context, open_timeout=20, close_timeout=20)
-        return self._socket
+        if self._socket is not None:
+            return self._socket
+
+        # Retry parameters
+        max_retries = 3
+        retry_delay = 1  # seconds
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                # 20 seconds is more then enough to establish connection and exchange
+                # them handshakes.
+                self._socket = client.connect(
+                    self.server_addr,
+                    ssl=self.ssl_context,
+                    open_timeout=20,
+                    close_timeout=20
+                )
+                return self._socket
+
+            except Exception as e:
+                logger.error(f"Connection attempt {attempt}/{max_retries} failed: {e}")
+
+                # On last attempt, don't wait
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
+
+        logger.error(f"Failed to establish connection after {max_retries} attempts")
+        return None
 
     def disconnect(self):
         if self._socket is not None:
@@ -192,15 +214,17 @@ class Device:
 
     def single_run(self):
         logger.debug("starting simulation")
-        self.connect()
         start = time.time()
         try:
-            self.send_hello(self._socket)
             while True:
                 if self._socket is None:
                     logger.error(
                         "Connection to GW is lost. Trying to reconnect...")
-                    self.connect()
+                    if self.connect():
+                        self.send_hello(self._socket)
+                    else:
+                        time.sleep(1)
+                        continue
                 if time.time() - start > self.interval:
                     logger.info(f"Device sim heartbeat")
                     self.send_state_event(self._socket)
@@ -217,15 +241,17 @@ class Device:
         if self.stop_event.is_set():
             return
         logger.debug("starting simulation")
-        self.connect()
         start = time.time()
         try:
-            self.send_hello(self._socket)
             while not self.stop_event.is_set():
                 if self._socket is None:
                     logger.error(
                         "Connection to GW is lost. Trying to reconnect...")
-                    self.connect()
+                    if self.connect():
+                        self.send_hello(self._socket)
+                    else:
+                        time.sleep(1)
+                        continue
                 if time.time() - start > self.interval:
                     logger.info(f"Device sim heartbeat")
                     self.send_state_event(self._socket)

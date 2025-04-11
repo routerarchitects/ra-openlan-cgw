@@ -1,16 +1,18 @@
 use crate::{
-    cgw_app_args::CGWRedisArgs,
     cgw_db_accessor::{CGWDBAccessor, CGWDBInfra, CGWDBInfrastructureGroup},
-    cgw_device::{CGWDevice, CGWDeviceState, CGWDeviceType},
-    cgw_devices_cache::CGWDevicesCache,
-    cgw_errors::{Error, Result},
     cgw_metrics::{
         CGWMetrics, CGWMetricsCounterOpType, CGWMetricsCounterType, CGWMetricsHealthComponent,
         CGWMetricsHealthComponentStatus,
     },
     cgw_remote_client::CGWRemoteClient,
+};
+
+use cgw_common::{
+    cgw_app_args::{AppArgs, CGWRedisArgs},
+    cgw_device::{CGWDevice, CGWDeviceState, CGWDeviceType},
+    cgw_devices_cache::CGWDevicesCache,
+    cgw_errors::{Error, Result},
     cgw_tls::cgw_read_root_certs_dir,
-    AppArgs,
 };
 
 use std::{
@@ -18,25 +20,31 @@ use std::{
     net::{Ipv4Addr, SocketAddr},
     str::FromStr,
     sync::Arc,
-    time::Duration,
 };
 
 use redis::{
-    aio::MultiplexedConnection, Client, ConnectionInfo, RedisConnectionInfo, RedisResult,
-    TlsCertificates, ToRedisArgs,
+    aio::{ConnectionManager, ConnectionManagerConfig},
+    Client, ConnectionInfo, ProtocolVersion, PushInfo, PushKind, RedisConnectionInfo, RedisResult,
+    TlsCertificates, ToRedisArgs, Value,
 };
 
 use eui48::MacAddress;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::{
+    sync::{mpsc::UnboundedReceiver, Mutex, RwLock},
+    time::{sleep, Duration},
+};
 
 use chrono::Utc;
+use std::time::Instant;
 
 // Used in remote lookup
 static REDIS_KEY_SHARD_ID_PREFIX: &str = "shard_id_";
 static REDIS_KEY_SHARD_ID_FIELDS_NUM: usize = 12;
 static REDIS_KEY_SHARD_VALUE_ASSIGNED_G_NUM: &str = "assigned_groups_num";
+static REDIS_KEY_SHARD_DEVICE_CACHE_LAST_UPDATE_TIMESTAMP: &str =
+    "_device_cache_last_update_timestamp";
 
 // Used in group assign / reassign
 static REDIS_KEY_GID: &str = "group_id_";
@@ -48,6 +56,12 @@ static REDIS_KEY_GID_GROUP_CLOUD_HEADER: &str = "group_cloud_header";
 static REDIS_KEY_GID_INFRA_CLOUD_HEADER: &str = "infra_cloud_header";
 
 const CGW_REDIS_DEVICES_CACHE_DB: u32 = 1;
+
+const CGW_REDIS_PUBSUB_TOPIC: &str = "cgw_notification_channel";
+
+pub fn cgw_redis_default_proto() -> ProtocolVersion {
+    ProtocolVersion::default()
+}
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CGWREDISDBShard {
@@ -285,8 +299,10 @@ impl CGWInfraGroupInfrasCloudHeaderMap {
 #[derive(Clone)]
 pub struct CGWRemoteDiscovery {
     db_accessor: Arc<CGWDBAccessor>,
-    redis_client: MultiplexedConnection,
-    redis_infra_cache_client: MultiplexedConnection,
+    redis_pubsub_client: ConnectionManager,
+    redis_pubsub_rx_mbox: Arc<Mutex<UnboundedReceiver<PushInfo>>>,
+    redis_client: ConnectionManager,
+    redis_infra_cache_client: ConnectionManager,
     gid_to_cgw_cache: Arc<RwLock<HashMap<i32, i32>>>,
     remote_cgws_map: Arc<RwLock<HashMap<i32, CGWRemoteIface>>>,
     group_to_header_map: Arc<RwLock<CGWInfraGroupCloudHeaderMap>>,
@@ -294,7 +310,10 @@ pub struct CGWRemoteDiscovery {
     local_shard_id: i32,
 }
 
-pub async fn cgw_create_redis_client(redis_args: &CGWRedisArgs) -> Result<Client> {
+pub async fn cgw_create_redis_client(
+    redis_args: &CGWRedisArgs,
+    protocol: ProtocolVersion,
+) -> Result<Client> {
     let redis_client_info = ConnectionInfo {
         addr: match redis_args.redis_tls {
             true => redis::ConnectionAddr::TcpTls {
@@ -311,6 +330,7 @@ pub async fn cgw_create_redis_client(redis_args: &CGWRedisArgs) -> Result<Client
         redis: RedisConnectionInfo {
             username: redis_args.redis_username.clone(),
             password: redis_args.redis_password.clone(),
+            protocol,
             ..Default::default()
         },
     };
@@ -347,7 +367,13 @@ impl CGWRemoteDiscovery {
             app_args.redis_args.redis_host, app_args.redis_args.redis_port
         );
 
-        let redis_client = match cgw_create_redis_client(&app_args.redis_args).await {
+        // Don't really need RESP3 here, RESP3 only needed for pub/sub client.
+        let redis_client = match cgw_create_redis_client(
+            &app_args.redis_args,
+            cgw_redis_default_proto(),
+        )
+        .await
+        {
             Ok(c) => c,
             Err(e) => {
                 error!(
@@ -357,13 +383,12 @@ impl CGWRemoteDiscovery {
             }
         };
 
-        let redis_client = match redis_client
-            .get_multiplexed_tokio_connection_with_response_timeouts(
-                Duration::from_secs(15),
-                Duration::from_secs(15),
-            )
-            .await
-        {
+        let cfg = ConnectionManagerConfig::new()
+            .set_connection_timeout(Duration::from_secs(10))
+            .set_response_timeout(Duration::from_secs(10))
+            .set_number_of_retries(5);
+
+        let redis_client = match ConnectionManager::new_with_config(redis_client, cfg).await {
             Ok(conn) => conn,
             Err(e) => {
                 error!(
@@ -374,7 +399,14 @@ impl CGWRemoteDiscovery {
         };
 
         /* Start Redis Infra Cache Client */
-        let redis_infra_cache_client = match cgw_create_redis_client(&app_args.redis_args).await {
+        // Don't really need RESP3 here, RESP3 only needed for pub/sub client.
+        // Pass NONE to use some default value that function wants.
+        let redis_infra_cache_client = match cgw_create_redis_client(
+            &app_args.redis_args,
+            cgw_redis_default_proto(),
+        )
+        .await
+        {
             Ok(c) => c,
             Err(e) => {
                 error!(
@@ -386,12 +418,16 @@ impl CGWRemoteDiscovery {
             }
         };
 
-        let mut redis_infra_cache_client = match redis_infra_cache_client
-            .get_multiplexed_tokio_connection_with_response_timeouts(
-                Duration::from_secs(15),
-                Duration::from_secs(15),
-            )
-            .await
+        let cfg = ConnectionManagerConfig::new()
+            .set_connection_timeout(Duration::from_secs(10))
+            .set_response_timeout(Duration::from_secs(10))
+            .set_number_of_retries(5);
+
+        let mut redis_infra_cache_client = match ConnectionManager::new_with_config(
+            redis_infra_cache_client,
+            cfg,
+        )
+        .await
         {
             Ok(conn) => conn,
             Err(e) => {
@@ -425,6 +461,58 @@ impl CGWRemoteDiscovery {
 
         /* End Redis Infra Cache Client */
 
+        /* Start of init pubsub client*/
+
+        // Explicitly request RESP3 here. Needed for underlying push_sender impl.
+        let redis_pubsub_client = match cgw_create_redis_client(
+            &app_args.redis_args,
+            ProtocolVersion::RESP3,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                error!(
+                    "Can't create CGW Remote Discovery client! PUB/SUB Redis client create failed! Error: {e}"
+                );
+                return Err(Error::RemoteDiscovery("Redis client create failed"));
+            }
+        };
+
+        // Needed for push_sender / receiving messages from subscribed topics.
+        let (channel_tx, channel_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let cfg = ConnectionManagerConfig::new()
+            .set_connection_timeout(Duration::from_secs(10))
+            .set_response_timeout(Duration::from_secs(10))
+            .set_number_of_retries(5)
+            .set_push_sender(channel_tx)
+            .set_automatic_resubscription();
+
+        let mut redis_pubsub_client = match ConnectionManager::new_with_config(
+            redis_pubsub_client,
+            cfg,
+        )
+        .await
+        {
+            Ok(conn) => conn,
+            Err(e) => {
+                error!(
+                    "Can't create CGW Remote Discovery client! Get PUB/SUB Redis async connection failed! Error: {e}"
+                );
+                return Err(Error::RemoteDiscovery("Redis client create failed"));
+            }
+        };
+
+        if let Err(e) = redis_pubsub_client.subscribe(CGW_REDIS_PUBSUB_TOPIC).await {
+            warn!(
+                "Failed to subscribe to REDIS {} topic (channel) - {e}",
+                CGW_REDIS_PUBSUB_TOPIC
+            );
+        }
+
+        /* EO of init pubsub client*/
+
         let db_accessor = match CGWDBAccessor::new(&app_args.db_args).await {
             Ok(c) => c,
             Err(e) => {
@@ -437,6 +525,8 @@ impl CGWRemoteDiscovery {
 
         let rc = CGWRemoteDiscovery {
             db_accessor: Arc::new(db_accessor),
+            redis_pubsub_client,
+            redis_pubsub_rx_mbox: Arc::new(Mutex::new(channel_rx)),
             redis_client,
             redis_infra_cache_client,
             gid_to_cgw_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -451,6 +541,7 @@ impl CGWRemoteDiscovery {
             return Err(Error::RemoteDiscovery("Failed to update Redis timestamp"));
         }
 
+        let now = Instant::now();
         let assigned_groups_num: i32 = match rc.sync_gid_to_cgw_map().await {
             Ok(assigned_groups) => assigned_groups,
             Err(e) => {
@@ -460,18 +551,23 @@ impl CGWRemoteDiscovery {
                 ));
             }
         };
+        let elapsed = now.elapsed();
+        info!("sync_gid_to_cgw_map took: {:.2?}", elapsed);
 
         debug!(
             "Found {assigned_groups_num} assigned to CGW ID {}",
             app_args.cgw_id
         );
 
+        let now = Instant::now();
         if let Err(e) = rc.sync_remote_cgw_map().await {
             error!("Can't create CGW Remote Discovery client! Failed to sync remote CGW map! Error: {e}");
             return Err(Error::RemoteDiscovery(
                 "Failed to sync (sync_remote_cgw_map) remote CGW info from REDIS",
             ));
         }
+        let elapsed = now.elapsed();
+        info!("sync_remote_cgw_map took: {:.2?}", elapsed);
 
         let redisdb_shard_info = CGWREDISDBShard {
             id: app_args.cgw_id,
@@ -522,6 +618,8 @@ impl CGWRemoteDiscovery {
             ));
         }
 
+        let now = Instant::now();
+
         if let Err(e) = rc.sync_gid_to_cgw_map().await {
             error!(
                 "Can't create CGW Remote Discovery client! Failed to sync GID to CGW map! Error: {e}"
@@ -530,7 +628,10 @@ impl CGWRemoteDiscovery {
                 "Failed to sync (sync_gid_to_cgw_map) gid to cgw map",
             ));
         }
+        let elapsed = now.elapsed();
+        info!("sync_gid_to_cgw_map took: {:.2?}", elapsed);
 
+        let now = Instant::now();
         if let Err(e) = rc.sync_remote_cgw_map().await {
             error!(
                 "Can't create CGW Remote Discovery client! Failed to sync remote CGW map! Error: {e}"
@@ -539,7 +640,10 @@ impl CGWRemoteDiscovery {
                 "Failed to sync (sync_remote_cgw_map) remote CGW info from REDIS",
             ));
         }
+        let elapsed = now.elapsed();
+        info!("sync_remote_cgw_map took: {:.2?}", elapsed);
 
+        let now = Instant::now();
         if let Err(e) = rc.sync_group_to_header_map().await {
             error!(
                 "Can't create CGW Remote Discovery client! Failed to sync group to cloud header map! Error: {e}"
@@ -548,7 +652,10 @@ impl CGWRemoteDiscovery {
                 "Failed to sync (sync_group_to_header_map) remote CGW info from REDIS",
             ));
         }
+        let elapsed = now.elapsed();
+        info!("sync_group_to_header_map took: {:.2?}", elapsed);
 
+        let now = Instant::now();
         if let Err(e) = rc.sync_group_infras_to_header_map().await {
             error!(
                 "Can't create CGW Remote Discovery client! Failed to sync group infras to cloud header map! Error: {e}"
@@ -557,6 +664,8 @@ impl CGWRemoteDiscovery {
                 "Failed to sync (sync_group_infras_to_header_map) remote CGW info from REDIS",
             ));
         }
+        let elapsed = now.elapsed();
+        info!("sync_group_infras_to_header_map took: {:.2?}", elapsed);
 
         debug!(
             "Found {} remote CGWs",
@@ -775,6 +884,11 @@ impl CGWRemoteDiscovery {
                 CGWMetricsCounterOpType::Inc,
             );
         }
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         Ok(())
     }
 
@@ -803,6 +917,10 @@ impl CGWRemoteDiscovery {
                 CGWMetricsCounterType::GroupsAssignedNum,
                 CGWMetricsCounterOpType::Dec,
             );
+        }
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
         }
 
         Ok(())
@@ -843,6 +961,10 @@ impl CGWRemoteDiscovery {
             )
             .await;
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         Ok(())
     }
 
@@ -879,6 +1001,10 @@ impl CGWRemoteDiscovery {
                 CGWMetricsCounterOpType::DecBy(decrement_value as i64),
             )
             .await;
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
 
         Ok(())
     }
@@ -1006,6 +1132,10 @@ impl CGWRemoteDiscovery {
 
         debug!("REDIS: assigned gid{gid} to shard{dst_cgw_id}");
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         Ok(dst_cgw_id)
     }
 
@@ -1029,6 +1159,10 @@ impl CGWRemoteDiscovery {
         debug!("REDIS: deassign gid {gid} from controlled CGW");
 
         self.gid_to_cgw_cache.write().await.remove(&gid);
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
 
         Ok(())
     }
@@ -1073,6 +1207,10 @@ impl CGWRemoteDiscovery {
 
         if let Some(header) = g.cloud_header.clone() {
             self.add_group_to_header_map(g.id, header).await;
+        }
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
         }
 
         Ok(shard_id)
@@ -1143,7 +1281,16 @@ impl CGWRemoteDiscovery {
 
         CGWMetrics::get_ref().delete_group_counter(gid).await;
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         Ok(())
+    }
+
+    pub async fn remove_group_infras_header(&self, group_id: i32) {
+        self.del_group_infras_header_map(group_id).await;
+        self.remove_group_to_header_map(&group_id).await;
     }
 
     async fn add_group_to_header_map(&self, group_id: i32, cloud_header: String) {
@@ -1173,6 +1320,7 @@ impl CGWRemoteDiscovery {
     }
 
     pub async fn sync_group_to_header_map(&self) -> Result<()> {
+        let gid_cgw_lock = self.gid_to_cgw_cache.write().await;
         let mut lock = self.group_to_header_map.write().await;
 
         // Clear hashmap
@@ -1195,6 +1343,26 @@ impl CGWRemoteDiscovery {
         };
 
         for key in redis_keys {
+            // Try to strip prefix to get group ID
+            if let Some(gid_str) = key.strip_prefix(REDIS_KEY_GID) {
+                if let Ok(id) = gid_str.parse::<i32>() {
+                    // Try to get shard owner id from stripped group ID
+                    if let Some(cgw_id) = gid_cgw_lock.get(&id) {
+                        // If this gid is not managed by local shard
+                        // there's no need in syncing it's cloud hdr data
+                        if self.local_shard_id != *cgw_id {
+                            debug!("Skipped {} as it's not managed by local CGW", key);
+                            continue;
+                        }
+                    }
+                } else {
+                    warn!(
+                        "Failed to parse i32 gid from {} while syncing header map",
+                        key
+                    );
+                }
+            }
+
             let group_id: i32 = match redis::cmd("HGET")
                 .arg(&key)
                 .arg(REDIS_KEY_GID_VALUE_GID)
@@ -1214,14 +1382,9 @@ impl CGWRemoteDiscovery {
             if let Ok(cloud_header) = redis::cmd("HGET")
                 .arg(&key)
                 .arg(REDIS_KEY_GID_GROUP_CLOUD_HEADER)
-                .query_async::<_, String>(&mut con)
+                .query_async::<_>(&mut con)
                 .await
             {
-                debug!(
-                    "Found group {key}, group id: {group_id}, cloud_header: {:?}",
-                    cloud_header
-                );
-
                 lock.insert(group_id, cloud_header);
             }
         }
@@ -1340,6 +1503,10 @@ impl CGWRemoteDiscovery {
             }
         }
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         // Update assigned infras num
         if let Err(e) = self
             .increment_group_assigned_infras_num(gid, assigned_infras_num)
@@ -1434,6 +1601,10 @@ impl CGWRemoteDiscovery {
                     failed_infras.push(infras[i]);
                 }
             }
+        }
+
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
         }
 
         // Update assigned infras num
@@ -1610,6 +1781,9 @@ impl CGWRemoteDiscovery {
     }
 
     pub async fn sync_group_infras_to_header_map(&self) -> Result<()> {
+        // TODO: test for deadlocks?
+        // Cache is needed to ignore not-locally-owned-gids
+        let gid_cgw_lock = self.gid_to_cgw_cache.write().await;
         let mut lock = self.infras_to_header_map.write().await;
 
         // Clear hashmap
@@ -1632,6 +1806,26 @@ impl CGWRemoteDiscovery {
         };
 
         for key in redis_keys {
+            // Try to strip prefix to get group ID
+            if let Some(gid_str) = key.strip_prefix(REDIS_KEY_GID) {
+                if let Ok(id) = gid_str.parse::<i32>() {
+                    // Try to get shard owner id from stripped group ID
+                    if let Some(cgw_id) = gid_cgw_lock.get(&id) {
+                        // If this gid is not managed by local shard
+                        // there's no need in syncing it's cloud hdr data
+                        if self.local_shard_id != *cgw_id {
+                            debug!("Skipped {} as it's not managed by local CGW", key);
+                            continue;
+                        }
+                    }
+                } else {
+                    warn!(
+                        "Failed to parse i32 gid from {} while syncing header map",
+                        key
+                    );
+                }
+            }
+
             let group_id: i32 = match redis::cmd("HGET")
                 .arg(&key)
                 .arg(REDIS_KEY_GID_VALUE_GID)
@@ -1651,14 +1845,9 @@ impl CGWRemoteDiscovery {
             if let Ok(cloud_header) = redis::cmd("HGET")
                 .arg(&key)
                 .arg(REDIS_KEY_GID_INFRA_CLOUD_HEADER)
-                .query_async::<_, String>(&mut con)
+                .query_async::<String>(&mut con)
                 .await
             {
-                debug!(
-                    "Found group {key}, group id: {group_id}, cloud_header: {:?}",
-                    cloud_header
-                );
-
                 if let Ok(map) = serde_json::from_str(&cloud_header) {
                     lock.add_item(group_id, CGWInfraGroupInfrasCloudHeaderItem { map });
                 }
@@ -1776,9 +1965,14 @@ impl CGWRemoteDiscovery {
             error!("rebalance_all_groups: failed update Redis timestamp! Error: {e}");
         }
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         if let Err(e) = self.sync_remote_cgw_map().await {
             error!("rebalance_all_groups: failed to sync remote CGW map! Error: {e}");
         }
+
         if let Err(e) = self.sync_gid_to_cgw_map().await {
             error!("rebalance_all_groups: failed to sync GID to CGW! Error: {e}");
         }
@@ -1887,6 +2081,10 @@ impl CGWRemoteDiscovery {
             }
         };
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         Ok(())
     }
 
@@ -1912,19 +2110,88 @@ impl CGWRemoteDiscovery {
             }
         };
 
+        if let Err(e) = self.set_device_cache_last_update_timestamp().await {
+            warn!("Failed to update device cache last update timestamp! Error: {e}");
+        }
+
         Ok(())
     }
 
-    pub async fn sync_devices_cache_with_redis(
+    fn deserialize_single_device_cache_redis_entry(
         &self,
-        cache: Arc<RwLock<CGWDevicesCache>>,
-    ) -> Result<()> {
-        let mut devices_cache = cache.write().await;
+        device_str: &String,
+        key: &String,
+    ) -> Result<(CGWDevice, MacAddress)> {
+        let mut splitted_key = key.split_terminator('|');
+        let _shard_id = splitted_key.next();
+        let infra = match splitted_key.next() {
+            Some(mac) => match MacAddress::from_str(mac) {
+                Ok(mac_address) => mac_address,
+                Err(e) => {
+                    error!(
+                        "Failed to parse device mac address from key {}! Error: {}",
+                        self.local_shard_id, e
+                    );
+                    return Err(Error::RemoteDiscovery(
+                        "Failed to parse device mac address from key",
+                    ));
+                }
+            },
+            None => {
+                error!(
+                    "Failed to get device mac address from key {}!",
+                    self.local_shard_id,
+                );
+                return Err(Error::RemoteDiscovery(
+                    "Failed to get device mac address from key",
+                ));
+            }
+        };
 
+        match serde_json::from_str(&device_str) {
+            Ok(dev) => {
+                //devices_cache.replace_device(&infra, &dev);
+                Ok((dev, infra))
+            }
+            Err(e) => {
+                error!("Failed to deserialize device from Redis cache! Error: {e}");
+                Err(Error::RemoteDiscovery(
+                    "Failed to deserialize device from Redis cache",
+                ))
+            }
+        }
+    }
+
+    pub async fn sync_single_device_cache_with_redis(
+        &self,
+        devices_cache: &mut CGWDevicesCache,
+        infra: MacAddress,
+    ) -> Result<()> {
         let mut con = self.redis_infra_cache_client.clone();
-        let key = format!("shard_id_{}|*", self.local_shard_id);
+        let key = format!("shard_id_{}|{}", self.local_shard_id, infra.to_canonical());
         let redis_keys: Vec<String> = match redis::cmd("KEYS").arg(&key).query_async(&mut con).await
         {
+            Err(e) => {
+                if e.is_io_error() {
+                    Self::set_redis_health_state_not_ready(e.to_string()).await;
+                }
+                return Err(Error::RemoteDiscovery(
+                    "Failed to get device cache from Redis",
+                ));
+            }
+            Ok(key) => key,
+        };
+
+        if redis_keys.is_empty() {
+            return Ok(());
+        }
+
+        let device_str: String = match redis::cmd("GET")
+            .arg(&redis_keys[0])
+            .query_async(&mut con)
+            .await
+        {
+            Ok(dev) => dev,
             Err(e) => {
                 if e.is_io_error() {
                     Self::set_redis_health_state_not_ready(e.to_string()).await;
@@ -1937,116 +2204,31 @@ impl CGWRemoteDiscovery {
                     "Failed to get devices cache from Redis",
                 ));
             }
-            Ok(keys) => keys,
         };
 
-        for key in redis_keys {
-            let device_str: String = match redis::cmd("GET").arg(&key).query_async(&mut con).await {
-                Ok(dev) => dev,
-                Err(e) => {
-                    if e.is_io_error() {
-                        Self::set_redis_health_state_not_ready(e.to_string()).await;
-                    }
-                    error!(
-                        "Failed to get devices cache from Redis for shard id {}, Error: {}",
-                        self.local_shard_id, e
-                    );
-                    return Err(Error::RemoteDiscovery(
-                        "Failed to get devices cache from Redis",
-                    ));
-                }
-            };
-
-            let mut splitted_key = key.split_terminator('|');
-            let _shard_id = splitted_key.next();
-            let device_mac = match splitted_key.next() {
-                Some(mac) => match MacAddress::from_str(mac) {
-                    Ok(mac_address) => mac_address,
-                    Err(e) => {
-                        error!(
-                            "Failed to parse device mac address from key {}! Error: {}",
-                            self.local_shard_id, e
-                        );
-                        return Err(Error::RemoteDiscovery(
-                            "Failed to parse device mac address from key",
-                        ));
-                    }
-                },
-                None => {
-                    error!(
-                        "Failed to get device mac address from key {}!",
-                        self.local_shard_id,
-                    );
-                    return Err(Error::RemoteDiscovery(
-                        "Failed to get device mac address from key",
-                    ));
-                }
-            };
-
-            match serde_json::from_str(&device_str) {
-                Ok(dev) => {
-                    devices_cache.replace_device(&device_mac, &dev);
-                    CGWMetrics::get_ref()
-                        .change_group_counter(
-                            dev.get_device_group_id(),
-                            CGWMetricsCounterType::GroupInfrasAssignedNum,
-                            CGWMetricsCounterOpType::Inc,
-                        )
-                        .await;
-                }
-                Err(e) => {
-                    error!("Failed to deserialize device from Redis cache! Error: {e}");
-                    return Err(Error::RemoteDiscovery(
-                        "Failed to deserialize device from Redis cache",
-                    ));
-                }
-            };
+        match self.deserialize_single_device_cache_redis_entry(&device_str, &redis_keys[0]) {
+            Ok((dev, _)) => {
+                devices_cache.replace_device(&infra, &dev);
+                CGWMetrics::get_ref()
+                    .change_group_counter(
+                        dev.get_device_group_id(),
+                        CGWMetricsCounterType::GroupInfrasAssignedNum,
+                        CGWMetricsCounterOpType::Inc,
+                    )
+                    .await;
+            }
+            Err(e) => {
+                return Err(e);
+            }
         }
 
         Ok(())
     }
 
-    pub async fn sync_devices_cache(&self) -> Result<()> {
-        if let Some(infras_list) = self.db_accessor.get_all_infras().await {
-            let mut con = self.redis_infra_cache_client.clone();
-            let mut redis_keys: Vec<String> = match redis::cmd("KEYS")
-                .arg(format!("shard_id_{}|*", self.local_shard_id))
-                .query_async(&mut con)
-                .await
-            {
-                Err(e) => {
-                    if e.is_io_error() {
-                        Self::set_redis_health_state_not_ready(e.to_string()).await;
-                    }
-                    error!(
-                        "Failed to get devices cache from Redis for shard id {}, Error: {}",
-                        self.local_shard_id, e
-                    );
-                    return Err(Error::RemoteDiscovery(
-                        "Failed to get devices cache from Redis",
-                    ));
-                }
-                Ok(keys) => keys,
-            };
-
-            for infra in infras_list {
-                redis_keys.retain(|key| {
-                    !key.contains(&format!("shard_id_{}|{}", self.local_shard_id, infra.mac))
-                });
-            }
-
-            for key in redis_keys {
-                if let Err(res) = redis::cmd("DEL")
-                    .arg(&key)
-                    .query_async::<redis::aio::MultiplexedConnection, ()>(&mut con)
-                    .await
-                {
-                    warn!("Failed to delete cache entry {}! Error: {}", key, res);
-                }
-            }
+    pub async fn remove_devices_cache_from_redis(&self, infras_list: &Vec<MacAddress>) {
+        for infra in infras_list {
+            let _ = self.del_device_from_redis_cache(&infra).await;
         }
-
-        Ok(())
     }
 
     pub async fn set_redis_last_update_timestamp(&self) -> Result<()> {
@@ -2119,5 +2301,132 @@ impl CGWRemoteDiscovery {
 
     pub async fn get_group_infras_from_db(&self, group_id: i32) -> Option<Vec<CGWDBInfra>> {
         self.db_accessor.clone().get_group_infras(group_id).await
+    }
+
+    pub async fn set_device_cache_last_update_timestamp(&self) -> Result<()> {
+        // Generate current UTC timestamp
+        let mut con = self.redis_infra_cache_client.clone();
+        let now = Utc::now();
+        let timestamp = now.timestamp(); // Get seconds since the UNIX epoch
+
+        let key = format!(
+            "{}{}{}",
+            REDIS_KEY_SHARD_ID_PREFIX,
+            self.local_shard_id,
+            REDIS_KEY_SHARD_DEVICE_CACHE_LAST_UPDATE_TIMESTAMP
+        );
+        let res: RedisResult<()> = redis::cmd("SET")
+            .arg(key)
+            .arg(timestamp)
+            .query_async(&mut con)
+            .await;
+
+        match res {
+            Ok(_) => debug!(
+                "Updated Redis shard {} timestamp: {}",
+                self.local_shard_id, timestamp
+            ),
+            Err(e) => {
+                if e.is_io_error() {
+                    Self::set_redis_health_state_not_ready(e.to_string()).await;
+                }
+                warn!(
+                    "Failed to update Redis shard {} timestamp! Error: {}",
+                    self.local_shard_id, e
+                );
+                return Err(Error::RemoteDiscovery(
+                    "Failed to update Redis shard timestamp",
+                ));
+            }
+        };
+
+        Ok(())
+    }
+
+    pub async fn receive_broadcast_message(&self) -> Option<String> {
+        let mut mbox_lock = self.redis_pubsub_rx_mbox.lock().await;
+
+        // TODO: no sleep?
+        let _ = tokio::select! {
+            v = mbox_lock.recv() => {
+                if let Some(mut v) = v {
+                    debug!("Got msg {:?}", v);
+
+                    if let PushKind::Message = v.kind {
+                        if v.data.len() != 2 {
+                            warn!("Received Broadcast msg {:?}, but the num of args is invalid:{}, ignoring", v.data, v.data.len());
+                            return None;
+                        }
+
+                        match v.data.swap_remove(0) {
+                            Value::BulkString(val) => {
+                                let val = match String::from_utf8(val) {
+                                    Ok(val_str) => val_str,
+                                    Err(_) => {
+                                        warn!("Received Broadcast msg {:?}, but couldn't parse topic value, ignoring", v.data);
+                                        return None;
+                                    }
+                                };
+                                if val != CGW_REDIS_PUBSUB_TOPIC {
+                                    warn!("Received unexpected topic Broadcast msg {:?}, {} expected, ignoring", v.data, CGW_REDIS_PUBSUB_TOPIC);
+                                    return None;
+                                }
+                            }
+                            _ => {
+                                warn!("Received unexpected Broadcast msg type {:?}, 'bulk_string' expected, ignoring", v.data);
+                                return None;
+                            }
+                        }
+
+                        match v.data.swap_remove(0) {
+                            Value::BulkString(val) => {
+                                let val = match String::from_utf8(val) {
+                                    Ok(val_str) => val_str,
+                                    Err(_) => {
+                                        warn!("Received Broadcast msg {:?}, but couldn't parse underlying value, ignoring", v.data);
+                                        return None;
+                                    }
+                                };
+
+                                return Some(val);
+                            }
+                            _ => {
+                                warn!("Received unexpected Broadcast msg type {:?}, 'bulk_string' expected, ignoring", v.data);
+                                return None;
+                            }
+                        }
+                    } else {
+                        return None;
+                    }
+
+                } else {
+                    // Dead RX part, unexpected, potentially should restart CGW
+                    return None;
+                }
+            }
+
+            _ = sleep(Duration::from_millis(10)) => {
+                return None;
+            }
+        };
+    }
+
+    pub async fn send_broadcast_message(&self, msg: String) -> Result<()> {
+        let mut con = self.redis_pubsub_client.clone();
+        let res: RedisResult<()> = redis::cmd("PUBLISH")
+            .arg(CGW_REDIS_PUBSUB_TOPIC)
+            .arg(msg)
+            .query_async(&mut con)
+            .await;
+
+        if let Err(e) = res {
+            if e.is_io_error() {
+                Self::set_redis_health_state_not_ready(e.to_string()).await;
+            }
+            warn!("Failed to switch to Redis Database {CGW_REDIS_DEVICES_CACHE_DB}! Error: {e}");
+            return Err(Error::RemoteDiscovery("Failed to switch Redis Database"));
+        }
+
+        Ok(())
     }
 }

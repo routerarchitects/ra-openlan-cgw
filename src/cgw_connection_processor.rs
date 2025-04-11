@@ -1,7 +1,5 @@
 use crate::{
     cgw_connection_server::{CGWConnectionServer, CGWConnectionServerReqMsg},
-    cgw_device::{CGWDeviceCapabilities, CGWDeviceType},
-    cgw_errors::{Error, Result},
     cgw_nb_api_listener::{
         cgw_construct_cloud_header, cgw_construct_infra_join_msg,
         cgw_construct_infra_realtime_event_message, cgw_construct_infra_request_result_msg,
@@ -12,11 +10,16 @@ use crate::{
         CGWUCentralMessagesQueueItem, CGWUCentralMessagesQueueState, CGW_MESSAGES_QUEUE,
         MESSAGE_TIMEOUT_DURATION,
     },
-    cgw_ucentral_parser::{
-        cgw_ucentral_event_parse, cgw_ucentral_parse_connect_event, CGWUCentralCommandType,
-        CGWUCentralEventType, CGWUCentralReplyType,
-    },
     cgw_ucentral_topology_map::CGWUCentralTopologyMap,
+};
+
+use cgw_common::{
+    cgw_device::{CGWDeviceCapabilities, CGWDeviceType},
+    cgw_errors::{Error, Result},
+    cgw_ucentral_parser::{
+        cgw_proxy_parse_connect_event, cgw_ucentral_event_parse, cgw_ucentral_parse_connect_event,
+        CGWUCentralCommandType, CGWUCentralEventType, CGWUCentralReplyType,
+    },
 };
 
 use eui48::MacAddress;
@@ -29,16 +32,15 @@ use uuid::Uuid;
 
 use std::{net::SocketAddr, str::FromStr, sync::Arc};
 use tokio::{
-    net::TcpStream,
+    io::{AsyncRead, AsyncWrite},
     sync::mpsc::{unbounded_channel, UnboundedReceiver},
     time::{sleep, Duration, Instant},
 };
-use tokio_rustls::server::TlsStream;
 use tokio_tungstenite::{tungstenite::protocol::Message, WebSocketStream};
 use tungstenite::Message::{Close, Ping, Text};
 
-type SStream = SplitStream<WebSocketStream<TlsStream<TcpStream>>>;
-type SSink = SplitSink<WebSocketStream<TlsStream<TcpStream>>, Message>;
+type SStream<S> = SplitStream<WebSocketStream<S>>;
+type SSink<S> = SplitSink<WebSocketStream<S>, Message>;
 
 #[derive(Debug, Serialize)]
 pub struct ForeignConnection {
@@ -112,10 +114,11 @@ pub struct CGWConnectionProcessor {
     pub feature_topomap_enabled: bool,
     pub device_type: CGWDeviceType,
     pub connect_message: String,
+    pub proxy_mode: bool,
 }
 
 impl CGWConnectionProcessor {
-    pub fn new(server: Arc<CGWConnectionServer>, addr: SocketAddr) -> Self {
+    pub fn new(server: Arc<CGWConnectionServer>, addr: SocketAddr, proxy_mode: bool) -> Self {
         let conn_processor: CGWConnectionProcessor = CGWConnectionProcessor {
             cgw_server: server.clone(),
             serial: MacAddress::default(),
@@ -125,37 +128,43 @@ impl CGWConnectionProcessor {
             // Default to AP, it's safe, as later-on it will be changed
             device_type: CGWDeviceType::CGWDeviceAP,
             connect_message: String::default(),
+            proxy_mode: proxy_mode,
         };
 
         conn_processor
     }
 
-    pub async fn start(
+    pub async fn start<S>(
         mut self,
-        tls_stream: TlsStream<TcpStream>,
+        ws_stream: WebSocketStream<S>,
         client_cn: MacAddress,
         allow_mismatch: bool,
-    ) -> Result<()> {
-        let ws_stream = tokio::select! {
-            _val = tokio_tungstenite::accept_async(tls_stream) => {
-                match _val {
-                    Ok(s) => s,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (sink, mut stream) = ws_stream.split();
+
+        if self.proxy_mode {
+            debug!("Parse Proxy Connect Event");
+            if let Some(Ok(first_msg)) = stream.next().await {
+                debug!("Received first message: {:?}", first_msg);
+
+                match cgw_proxy_parse_connect_event(first_msg) {
+                    Ok(proxy_event) => {
+                        debug!("Successfully parsed proxy event: {:?}", proxy_event);
+                        // Set self.addr using the peer_address from the proxy event
+                        self.addr = proxy_event.peer_address;
+                        self.serial = proxy_event.serial;
+                    }
                     Err(e) => {
-                        error!("Failed to accept TLS stream from: {}! Reason: {}. Closing connection",
-                               self.addr, e);
-                        return Err(Error::ConnectionProcessor("Failed to accept TLS stream!"));
+                        warn!("Failed to parse proxy connect event: {}", e);
                     }
                 }
+            } else {
+                warn!("No initial message received from proxy connection");
             }
-            // TODO: configurable duration (upon server creation)
-            _val = sleep(Duration::from_millis(15000)) => {
-                error!("Failed to accept TLS stream from: {}! Closing connection", self.addr);
-                return Err(Error::ConnectionProcessor("Failed to accept TLS stream for too long"));
-            }
-
-        };
-
-        let (sink, mut stream) = ws_stream.split();
+        }
 
         // check if we have any pending msgs (we expect connect at this point, protocol-wise)
         // TODO: rework to ignore any WS-related frames until we get a connect message,
@@ -206,7 +215,7 @@ impl CGWConnectionProcessor {
             }
         };
 
-        if !allow_mismatch {
+        if !self.proxy_mode && !allow_mismatch {
             if evt.serial != client_cn {
                 error!(
                     "The client MAC address {} and client certificate CN {} check failed!",
@@ -605,11 +614,14 @@ impl CGWConnectionProcessor {
         Ok(CGWConnectionState::IsActive)
     }
 
-    async fn process_sink_mbox_rx_msg(
+    async fn process_sink_mbox_rx_msg<S>(
         &mut self,
-        sink: &mut SSink,
+        sink: &mut SSink<S>,
         val: Option<CGWConnectionProcessorReqMsg>,
-    ) -> Result<CGWConnectionState> {
+    ) -> Result<CGWConnectionState>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         if let Some(msg) = val {
             let processor_mac = self.serial;
             let timestamp = cgw_get_timestamp_16_digits();
@@ -689,6 +701,7 @@ impl CGWConnectionProcessor {
                                 self.connect_message.clone(),
                                 timestamp,
                             ) {
+                                debug!("Sending unassigned join msg");
                                 self.cgw_server.enqueue_mbox_message_from_cgw_to_nb_api(
                                     new_group_id,
                                     unassigned_join,
@@ -736,12 +749,14 @@ impl CGWConnectionProcessor {
         Ok(CGWConnectionState::IsActive)
     }
 
-    async fn process_connection(
+    async fn process_connection<S>(
         mut self,
-        mut stream: SStream,
-        mut sink: SSink,
+        mut stream: SStream<S>,
+        mut sink: SSink<S>,
         mut mbox_rx: UnboundedReceiver<CGWConnectionProcessorReqMsg>,
-    ) {
+    ) where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
         #[derive(Debug)]
         enum WakeupReason {
             Unspecified,
@@ -995,23 +1010,27 @@ impl CGWConnectionProcessor {
                     if let CGWConnectionState::IsActive = state {
                         continue;
                     } else if let CGWConnectionState::IsForcedToClose = state {
+                        let _ = sink.close().await;
                         // Return, because server already closed our mbox tx counterpart (rx),
                         // hence we don't need to send ConnectionClosed message. Server
                         // already knows we're closed.
                         return;
                     } else if let CGWConnectionState::ClosedGracefully = state {
+                        let _ = sink.close().await;
                         warn!(
                             "Remote client {} closed connection gracefully!",
                             self.serial.to_hex_string()
                         );
                         return self.send_connection_close_event().await;
                     } else if let CGWConnectionState::IsStale = state {
+                        let _ = sink.close().await;
                         warn!(
                             "Remote client {} closed due to inactivity!",
                             self.serial.to_hex_string()
                         );
                         return self.send_connection_close_event().await;
                     } else if let CGWConnectionState::IsDead = state {
+                        let _ = sink.close().await;
                         warn!(
                             "Remote client {} connection is dead!",
                             self.serial.to_hex_string()
