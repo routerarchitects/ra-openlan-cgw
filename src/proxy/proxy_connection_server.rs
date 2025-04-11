@@ -692,36 +692,38 @@ impl ProxyConnectionServer {
                     "Assigned device {} to group {} on CGW {}",
                     mac, device_group_id, owner_id
                 );
+
+                return Ok(());
             } else {
                 // Unexpected: cgw_group_owner_id is not assigned
                 warn!("Unexpected: unassigned connection: cgw_group_owner_id is not assigned for mac {} and group id: {}",
                         mac, device_group_id);
             }
-        } else {
-            // Device is not in cache
-            match self.get_round_robin_cgw_id().await {
-                Ok(round_robin_cgw_id) => {
-                    if let Err(e) = self.set_peer_connection(mac, round_robin_cgw_id, 0).await {
-                        error!("Failed to set round-robin peer for device {}: {}", mac, e);
-                        return Err(Error::ConnectionServer(format!(
-                            "Failed to set round-robin peer for device {}: {}",
-                            mac, e
-                        )));
-                    }
-                    debug!(
-                        "Assigned unregistered device {} to round-robin CGW {}",
-                        mac, round_robin_cgw_id
-                    );
-                }
-                Err(e) => {
+        }
+
+        // Device is not in cache
+        match self.get_round_robin_cgw_id().await {
+            Ok(round_robin_cgw_id) => {
+                if let Err(e) = self.set_peer_connection(mac, round_robin_cgw_id, 0).await {
+                    error!("Failed to set round-robin peer for device {}: {}", mac, e);
                     return Err(Error::ConnectionServer(format!(
-                        "Failed to get round-robin CGW ID: {} Error: {}",
+                        "Failed to set round-robin peer for device {}: {}",
                         mac, e
                     )));
                 }
+                debug!(
+                    "Assigned unregistered device {} to round-robin CGW {}",
+                    mac, round_robin_cgw_id
+                );
             }
-            debug!("Unassigned connection done! {} was not in cache", mac);
+            Err(e) => {
+                return Err(Error::ConnectionServer(format!(
+                    "Failed to get round-robin CGW ID: {} Error: {}",
+                    mac, e
+                )));
+            }
         }
+        debug!("Unassigned connection done! {} was not in cache", mac);
 
         Ok(())
     }
