@@ -533,32 +533,50 @@ impl ProxyConnectionServer {
                     }
                 } else if let ProxyConnectionServerReqMsg::ConnectionClosed(device_mac) = msg {
                     // Check if this connection exists
-                    if let Some(conn_info) = connmap_w_lock.get_mut(&device_mac) {
-                        // If the connection has an assigned CGW, just reset that assignment
-                        if conn_info.connected_to_cgw_id.is_some() {
-                            info!(
-                                "Connection map: CGW connection broken for {}, resetting CGW assignment",
+                    let need_to_sync_cgw_map = {
+                        if let Some(conn_info) = connmap_w_lock.get_mut(&device_mac) {
+                            // If the connection has an assigned CGW, just reset that assignment
+                            // and sync remote CGW map if needed
+                            if conn_info.connected_to_cgw_id.is_some() {
+                                info!(
+                                    "Connection map: CGW connection broken for {}, resetting CGW assignment",
+                                    device_mac
+                                );
+                                conn_info.connected_to_cgw_id = None;
+
+                                true // Need to sync remote CGW map
+                            } else {
+                                info!(
+                                    "Connection map: removed {} serial from connmap, new num_of_connections: {}",
+                                    device_mac,
+                                    connmap_w_lock.len() - 1
+                                );
+
+                                connmap_w_lock.remove(&device_mac);
+
+                                // Also remove the device from devices_to_sync
+                                let mut sync_devices = devices_to_sync.write().await;
+                                sync_devices.retain(|mac| *mac != device_mac);
+
+                                false // No need to sync remote CGW map
+                            }
+                        } else {
+                            debug!(
+                                "Received ConnectionClosed for unknown device: {}",
                                 device_mac
                             );
-                            conn_info.connected_to_cgw_id = None;
-                        } else {
-                            info!(
-                                "Connection map: removed {} serial from connmap, new num_of_connections: {}",
-                                device_mac,
-                                connmap_w_lock.len() - 1
-                            );
 
-                            connmap_w_lock.remove(&device_mac);
-
-                            // Also remove the device from devices_to_sync
-                            let mut sync_devices = devices_to_sync.write().await;
-                            sync_devices.retain(|mac| *mac != device_mac);
+                            false // No need to sync remote CGW map
                         }
-                    } else {
-                        debug!(
-                            "Received ConnectionClosed for unknown device: {}",
-                            device_mac
-                        );
+                    };
+
+                    if need_to_sync_cgw_map {
+                        if let Err(e) = self.proxy_remote_discovery.sync_remote_cgw_map().await {
+                            debug!(
+                                "Failed to sync remote CGW map after connection closed: {}",
+                                e
+                            );
+                        }
                     }
                 }
             }
