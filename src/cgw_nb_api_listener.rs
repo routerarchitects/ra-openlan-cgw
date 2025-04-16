@@ -204,7 +204,7 @@ pub struct ForeignInfraConnection {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct APClientJoinMessage {
+pub struct WirelessClientJoinMessage {
     pub r#type: &'static str,
     pub infra_group_id: i32,
     pub client: MacAddress,
@@ -218,7 +218,7 @@ pub struct APClientJoinMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct APClientLeaveMessage {
+pub struct WirelessClientLeaveMessage {
     pub r#type: &'static str,
     pub infra_group_id: i32,
     pub client: MacAddress,
@@ -231,7 +231,7 @@ pub struct APClientLeaveMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct APClientMigrateMessage {
+pub struct WirelessClientMigrateMessage {
     pub r#type: &'static str,
     pub infra_group_id: i32,
     pub client: MacAddress,
@@ -245,7 +245,7 @@ pub struct APClientMigrateMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct APWiredClientJoinMessage {
+pub struct WiredClientJoinMessage {
     pub r#type: &'static str,
     pub infra_group_id: i32,
     pub client: MacAddress,
@@ -258,7 +258,7 @@ pub struct APWiredClientJoinMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct APWiredClientLeaveMessage {
+pub struct WiredClientLeaveMessage {
     pub r#type: &'static str,
     pub infra_group_id: i32,
     pub client: MacAddress,
@@ -672,7 +672,7 @@ pub fn cgw_construct_client_join_msg(
     sequence_number: u64,
     timestamp: i64,
 ) -> Result<String> {
-    let client_join_msg = APClientJoinMessage {
+    let client_join_msg = WirelessClientJoinMessage {
         r#type: "wireless_client_join",
         infra_group_id,
         client,
@@ -696,7 +696,7 @@ pub fn cgw_construct_client_leave_msg(
     sequence_number: u64,
     timestamp: i64,
 ) -> Result<String> {
-    let client_join_msg = APClientLeaveMessage {
+    let client_join_msg = WirelessClientLeaveMessage {
         r#type: "wireless_client_leave",
         infra_group_id,
         client,
@@ -720,7 +720,7 @@ pub fn cgw_construct_client_migrate_msg(
     sequence_number: u64,
     timestamp: i64,
 ) -> Result<String> {
-    let client_migrate_msg = APClientMigrateMessage {
+    let client_migrate_msg = WirelessClientMigrateMessage {
         r#type: "wireless_client_migrate",
         infra_group_id,
         client,
@@ -744,7 +744,7 @@ pub fn cgw_construct_wired_client_join_msg(
     sequence_number: u64,
     timestamp: i64,
 ) -> Result<String> {
-    let client_join_msg = APWiredClientJoinMessage {
+    let client_join_msg = WiredClientJoinMessage {
         r#type: "wired_client_join",
         infra_group_id,
         client,
@@ -767,7 +767,7 @@ pub fn cgw_construct_wired_client_leave_msg(
     sequence_number: u64,
     timestamp: i64,
 ) -> Result<String> {
-    let client_join_msg = APWiredClientLeaveMessage {
+    let client_join_msg = WiredClientLeaveMessage {
         r#type: "wired_client_leave",
         infra_group_id,
         client,
@@ -946,7 +946,7 @@ pub fn cgw_construct_cloud_header(
     cloud_header
 }
 
-pub fn cgw_construct_ucentral_topomap_infra_join_msg(
+pub fn cgw_construct_topomap_infra_join_msg(
     infra_group_id: i32,
     infra_group_infra: MacAddress,
     cloud_header: Option<String>,
@@ -954,7 +954,7 @@ pub fn cgw_construct_ucentral_topomap_infra_join_msg(
     timestamp: i64,
 ) -> Result<String> {
     let infra_leave_msg = UCentralTopomapInfraJoin {
-        r#type: "ucantral_topomap_infra_join",
+        r#type: "topomap_infra_join",
         infra_group_id,
         infra_group_infra,
         cloud_header,
@@ -965,7 +965,7 @@ pub fn cgw_construct_ucentral_topomap_infra_join_msg(
     Ok(serde_json::to_string(&infra_leave_msg)?)
 }
 
-pub fn cgw_construct_ucentral_topomap_infra_leave_msg(
+pub fn cgw_construct_topomap_infra_leave_msg(
     infra_group_id: i32,
     infra_group_infra: MacAddress,
     cloud_header: Option<String>,
@@ -973,7 +973,7 @@ pub fn cgw_construct_ucentral_topomap_infra_leave_msg(
     timestamp: i64,
 ) -> Result<String> {
     let infra_leave_msg = UCentralTopomapInfraLeave {
-        r#type: "ucantral_topomap_infra_leave",
+        r#type: "topomap_infra_leave",
         infra_group_id,
         infra_group_infra,
         cloud_header,

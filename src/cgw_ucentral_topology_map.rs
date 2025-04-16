@@ -3,8 +3,8 @@ use crate::{
     cgw_nb_api_listener::{
         cgw_construct_client_join_msg, cgw_construct_client_leave_msg,
         cgw_construct_client_migrate_msg, cgw_construct_cloud_header,
-        cgw_construct_ucentral_topomap_infra_join_msg,
-        cgw_construct_ucentral_topomap_infra_leave_msg, cgw_construct_wired_client_join_msg,
+        cgw_construct_topomap_infra_join_msg,
+        cgw_construct_topomap_infra_leave_msg, cgw_construct_wired_client_join_msg,
         cgw_construct_wired_client_leave_msg, cgw_get_timestamp_16_digits, CGWKafkaProducerTopic,
     },
 };
@@ -158,21 +158,21 @@ type WiredClientsJoinList = Vec<WiredClientJoinInfo>;
 type WiredClientsLeaveList = Vec<WiredClientLeaveInfo>;
 
 #[derive(Debug, Eq, Hash, PartialEq)]
-struct ClinetParentInfo {
+struct ClientParentInfo {
     pub parent_ap_mac: MacAddress,
     pub last_seen_timestamp: ClientLastSeenTimestamp,
     pub ssid: String,
     pub band: String,
 }
 
-impl ClinetParentInfo {
+impl ClientParentInfo {
     pub fn new(
         parent_ap_mac: MacAddress,
         last_seen_timestamp: ClientLastSeenTimestamp,
         ssid: String,
         band: String,
-    ) -> ClinetParentInfo {
-        ClinetParentInfo {
+    ) -> ClientParentInfo {
+        ClientParentInfo {
             parent_ap_mac,
             last_seen_timestamp,
             ssid,
@@ -220,7 +220,7 @@ struct TopologyMapItemData {
     //     another GID, this event would be missed)
     //     (as per current implementation).
     // Track key:client mac, values:parent AP mac, last seen timestamp, ssid and band
-    pub connected_clients_map: HashMap<MacAddress, ClinetParentInfo>,
+    pub connected_clients_map: HashMap<MacAddress, ClientParentInfo>,
     pub connected_wired_clients_map: HashMap<MacAddress, WiredClientParentInfo>,
     pub sequence_number: u64,
 }
@@ -228,7 +228,7 @@ struct TopologyMapItemData {
 impl TopologyMapItemData {
     pub fn new(
         data: CGWUCentralTopologyMapData,
-        connected_clients_map: HashMap<MacAddress, ClinetParentInfo>,
+        connected_clients_map: HashMap<MacAddress, ClientParentInfo>,
         connected_wired_clients_map: HashMap<MacAddress, WiredClientParentInfo>,
     ) -> TopologyMapItemData {
         TopologyMapItemData {
@@ -612,7 +612,7 @@ impl CGWUCentralTopologyMap {
         let cloud_header: Option<String> =
             cgw_construct_cloud_header(group_cloud_header, infras_cloud_header);
 
-        let msg = cgw_construct_ucentral_topomap_infra_join_msg(
+        let msg = cgw_construct_topomap_infra_join_msg(
             gid,
             *topology_node_mac,
             cloud_header,
@@ -661,7 +661,7 @@ impl CGWUCentralTopologyMap {
             let cloud_header: Option<String> =
                 cgw_construct_cloud_header(group_cloud_header, infras_cloud_header);
 
-            let msg = cgw_construct_ucentral_topomap_infra_leave_msg(
+            let msg = cgw_construct_topomap_infra_leave_msg(
                 gid,
                 *topology_node_mac,
                 cloud_header,
@@ -1288,7 +1288,7 @@ impl CGWUCentralTopologyMap {
                                             // migrate event
                                             topology_map_data.connected_clients_map.insert(
                                                 *client_mac,
-                                                ClinetParentInfo::new(
+                                                ClientParentInfo::new(
                                                     node.mac,
                                                     client_connected_info.last_seen_timestamp,
                                                     client_connected_info.ssid.clone(),
@@ -1330,7 +1330,7 @@ impl CGWUCentralTopologyMap {
                                         // Just update the TS
                                         topology_map_data.connected_clients_map.insert(
                                             *client_mac,
-                                            ClinetParentInfo::new(
+                                            ClientParentInfo::new(
                                                 node.mac,
                                                 client_connected_info.last_seen_timestamp,
                                                 existing_client_info.ssid,
@@ -1342,7 +1342,7 @@ impl CGWUCentralTopologyMap {
                                     // Create new entry, generate connected event
                                     topology_map_data.connected_clients_map.insert(
                                         *client_mac,
-                                        ClinetParentInfo::new(
+                                        ClientParentInfo::new(
                                             node.mac,
                                             client_connected_info.last_seen_timestamp,
                                             client_connected_info.ssid.clone(),
@@ -1678,7 +1678,7 @@ impl CGWUCentralTopologyMap {
                                 // migrate event
                                 topology_map_data.connected_clients_map.insert(
                                     rt_j.client,
-                                    ClinetParentInfo::new(
+                                    ClientParentInfo::new(
                                         evt.serial,
                                         rt.timestamp,
                                         rt_j.ssid.clone(),
@@ -1713,7 +1713,7 @@ impl CGWUCentralTopologyMap {
                             // Just update the TS
                             topology_map_data.connected_clients_map.insert(
                                 rt_j.client,
-                                ClinetParentInfo::new(
+                                ClientParentInfo::new(
                                     evt.serial,
                                     rt.timestamp,
                                     rt_j.ssid.clone(),
@@ -1725,7 +1725,7 @@ impl CGWUCentralTopologyMap {
                         // Create new entry, generate connected event
                         topology_map_data.connected_clients_map.insert(
                             rt_j.client,
-                            ClinetParentInfo::new(
+                            ClientParentInfo::new(
                                 evt.serial,
                                 rt.timestamp,
                                 rt_j.ssid.clone(),

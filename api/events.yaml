@@ -481,14 +481,14 @@ infrastructure_realtime_event_message:
       the event had been received by the CGW on the socket level.
     type: integer
 
-ucantral_topomap_infra_join:
+topomap_infra_join:
   description:
     Event, that CGW Topology MAP generates whenever UCentral infra connects to the CGW.
   type:
     description: MANDATORY field. Type should be parsed by NB services for matching.
     type: string
     enum:
-    - ucantral_topomap_infra_join
+    - topomap_infra_join
   infra_group_id:
     description: MANDATORY field.
       Infrastructure group ID to which infra belongs to.
@@ -512,14 +512,14 @@ ucantral_topomap_infra_join:
       the event had been detected by the CGW.
     type: integer
 
-ucantral_topomap_infra_leave:
+topomap_infra_leave:
   description:
     Event, that CGW Topology MAP generates whenever UCentral infra disconnects from the CGW.
   type:
     description: MANDATORY field. Type should be parsed by NB services for matching.
     type: string
     enum:
-    - ucantral_topomap_infra_leave
+    - topomap_infra_leave
   infra_group_id:
     description: MANDATORY field.
       Infrastructure group ID to which infra belongs to.
