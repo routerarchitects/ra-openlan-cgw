@@ -4,8 +4,8 @@ use crate::{
         cgw_construct_client_join_msg, cgw_construct_client_leave_msg,
         cgw_construct_client_migrate_msg, cgw_construct_cloud_header,
         cgw_construct_ucentral_topomap_infra_join_msg,
-        cgw_construct_ucentral_topomap_infra_leave_msg, cgw_get_timestamp_16_digits,
-        CGWKafkaProducerTopic,
+        cgw_construct_ucentral_topomap_infra_leave_msg, cgw_construct_wired_client_join_msg,
+        cgw_construct_wired_client_leave_msg, cgw_get_timestamp_16_digits, CGWKafkaProducerTopic,
     },
 };
 
@@ -58,6 +58,30 @@ impl ClientLeaveInfo {
     }
 }
 
+// Wired Client mac, port_name
+struct WiredClientJoinInfo {
+    pub mac: MacAddress,
+    pub port_name: String,
+}
+
+impl WiredClientJoinInfo {
+    pub fn new(mac: MacAddress, port_name: String) -> WiredClientJoinInfo {
+        WiredClientJoinInfo { mac, port_name }
+    }
+}
+
+// Wired Client mac, port_name
+struct WiredClientLeaveInfo {
+    pub mac: MacAddress,
+    pub port_name: String,
+}
+
+impl WiredClientLeaveInfo {
+    pub fn new(mac: MacAddress, port_name: String) -> WiredClientLeaveInfo {
+        WiredClientLeaveInfo { mac, port_name }
+    }
+}
+
 // Client mac, new AP mac, band, ssid
 struct ClientMigrateInfo {
     pub mac: MacAddress,
@@ -78,6 +102,25 @@ impl ClientMigrateInfo {
             new_mac,
             ssid,
             band,
+        }
+    }
+}
+
+// Last seen, port_name
+#[derive(Debug, PartialEq, Eq)]
+struct WiredClientConnectedInfo {
+    pub last_seen_timestamp: ClientLastSeenTimestamp,
+    pub port_name: String,
+}
+
+impl WiredClientConnectedInfo {
+    pub fn new(
+        last_seen_timestamp: ClientLastSeenTimestamp,
+        port_name: String,
+    ) -> WiredClientConnectedInfo {
+        WiredClientConnectedInfo {
+            last_seen_timestamp,
+            port_name,
         }
     }
 }
@@ -110,6 +153,10 @@ type ClientsLeaveList = Vec<ClientLeaveInfo>;
 
 type ClientsMigrateList = Vec<ClientMigrateInfo>;
 
+type WiredClientsJoinList = Vec<WiredClientJoinInfo>;
+
+type WiredClientsLeaveList = Vec<WiredClientLeaveInfo>;
+
 #[derive(Debug, Eq, Hash, PartialEq)]
 struct ClinetParentInfo {
     pub parent_ap_mac: MacAddress,
@@ -134,6 +181,27 @@ impl ClinetParentInfo {
     }
 }
 
+#[derive(Debug, Eq, Hash, PartialEq)]
+struct WiredClientParentInfo {
+    pub parent_ap_mac: MacAddress,
+    pub last_seen_timestamp: ClientLastSeenTimestamp,
+    pub port_name: String,
+}
+
+impl WiredClientParentInfo {
+    pub fn new(
+        parent_ap_mac: MacAddress,
+        last_seen_timestamp: ClientLastSeenTimestamp,
+        port_name: String,
+    ) -> WiredClientParentInfo {
+        WiredClientParentInfo {
+            parent_ap_mac,
+            last_seen_timestamp,
+            port_name,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct TopologyMapItemData {
     pub data: CGWUCentralTopologyMapData,
@@ -153,6 +221,7 @@ struct TopologyMapItemData {
     //     (as per current implementation).
     // Track key:client mac, values:parent AP mac, last seen timestamp, ssid and band
     pub connected_clients_map: HashMap<MacAddress, ClinetParentInfo>,
+    pub connected_wired_clients_map: HashMap<MacAddress, WiredClientParentInfo>,
     pub sequence_number: u64,
 }
 
@@ -160,10 +229,12 @@ impl TopologyMapItemData {
     pub fn new(
         data: CGWUCentralTopologyMapData,
         connected_clients_map: HashMap<MacAddress, ClinetParentInfo>,
+        connected_wired_clients_map: HashMap<MacAddress, WiredClientParentInfo>,
     ) -> TopologyMapItemData {
         TopologyMapItemData {
             data,
             connected_clients_map,
+            connected_wired_clients_map,
             sequence_number: 1u64,
         }
     }
@@ -177,6 +248,11 @@ struct TopologyMapItem {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct CGWUCentralTopologyChildConnections {
     child_connections_map: HashMap<MacAddress, ClientConnectedInfo>,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CGWUCentralTopologyChildWiredConnections {
+    child_wired_connections_map: HashMap<MacAddress, WiredClientConnectedInfo>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -196,6 +272,7 @@ struct TopologyMapNodeData {
     pub origin_node: CGWUCentralTopologyMapNodeOrigin,
     pub connection_map: CGWUCentralTopologyMapConnections,
     pub client_connections_list: CGWUCentralTopologyChildConnections,
+    pub wired_client_connections_list: CGWUCentralTopologyChildWiredConnections,
 }
 
 impl TopologyMapNodeData {
@@ -203,11 +280,13 @@ impl TopologyMapNodeData {
         origin_node: CGWUCentralTopologyMapNodeOrigin,
         connection_map: CGWUCentralTopologyMapConnections,
         client_connections_list: CGWUCentralTopologyChildConnections,
+        wired_client_connections_list: CGWUCentralTopologyChildWiredConnections,
     ) -> TopologyMapNodeData {
         TopologyMapNodeData {
             origin_node,
             connection_map,
             client_connections_list,
+            wired_client_connections_list,
         }
     }
 }
@@ -501,6 +580,7 @@ impl CGWUCentralTopologyMap {
                     CGWUCentralTopologyMapNodeOrigin::UCentralDevice,
                     map_connections,
                     CGWUCentralTopologyChildConnections::default(),
+                    CGWUCentralTopologyChildWiredConnections::default(),
                 ),
             );
             topology_map_data.sequence_number += 1;
@@ -515,11 +595,12 @@ impl CGWUCentralTopologyMap {
                     CGWUCentralTopologyMapNodeOrigin::UCentralDevice,
                     map_connections,
                     CGWUCentralTopologyChildConnections::default(),
+                    CGWUCentralTopologyChildWiredConnections::default(),
                 ),
             );
             lock.item.insert(
                 gid,
-                TopologyMapItemData::new(topology_map_data, HashMap::new()),
+                TopologyMapItemData::new(topology_map_data, HashMap::new(), HashMap::new()),
             );
         }
 
@@ -564,6 +645,8 @@ impl CGWUCentralTopologyMap {
         let mut lock = self.data.write().await;
         // Disconnected clients (seen before, don't see now) client mac from -> AP mac
         let mut clients_leave_list: ClientsLeaveList = Vec::new();
+        // Disconnected wired clients list
+        let mut wired_clients_leave_list: WiredClientsLeaveList = Vec::new();
 
         if let Some(ref mut topology_map_data) = lock.item.get_mut(&gid) {
             Self::clear_related_nodes(&mut topology_map_data.data, topology_node_mac);
@@ -600,8 +683,8 @@ impl CGWUCentralTopologyMap {
                 .topology_nodes
                 .remove(topology_node_mac)
             {
-                // We have to clear Per-device connected clients from global
-                // map.
+                // We have to clear Per-device connected
+                // wireless clients from global map.
                 for client_mac in removed_clients_list
                     .client_connections_list
                     .child_connections_map
@@ -614,12 +697,43 @@ impl CGWUCentralTopologyMap {
                             .push(ClientLeaveInfo::new(*client_mac, client_parent_info.band));
                     }
                 }
+
+                // We have to clear Per-device connected
+                // wired clients from global map.
+                for wired_client_mac in removed_clients_list
+                    .wired_client_connections_list
+                    .child_wired_connections_map
+                    .keys()
+                {
+                    if let Some(wired_client_parent_info) =
+                        topology_map_data.connected_wired_clients_map.remove(wired_client_mac)
+                    {
+                        wired_clients_leave_list.push(WiredClientLeaveInfo::new(
+                            *wired_client_mac,
+                            wired_client_parent_info.port_name,
+                        ));
+                    }
+                }
             }
 
+            // Process wireless client leave events
             if !clients_leave_list.is_empty() {
                 Self::handle_clients_leave(
                     *topology_node_mac,
                     clients_leave_list,
+                    gid,
+                    topology_map_data,
+                    conn_server.clone(),
+                    timestamp,
+                )
+                .await;
+            }
+
+            // Process wired client leave events
+            if !wired_clients_leave_list.is_empty() {
+                Self::handle_wired_clients_leave(
+                    *topology_node_mac,
+                    wired_clients_leave_list,
                     gid,
                     topology_map_data,
                     conn_server.clone(),
@@ -792,6 +906,107 @@ impl CGWUCentralTopologyMap {
         }
     }
 
+    async fn handle_wired_clients_join(
+        node_mac: MacAddress,
+        clients_list: WiredClientsJoinList,
+        gid: i32,
+        topology_map_item_data: &mut TopologyMapItemData,
+
+        // TODO: remove this Arc:
+        // Dirty hack for now: pass Arc ref of srv to topomap;
+        // Future rework and refactoring would require to separate
+        // NB api from being an internal obj of conn_server to be a
+        // standalone (singleton?) object.
+        conn_server: Arc<CGWConnectionServer>,
+        timestamp: i64,
+    ) {
+        if clients_list.is_empty() {
+            return;
+        }
+
+        // We have AP mac, iterate only over keys - wired client macs
+        for client_info in clients_list {
+            let group_cloud_header: Option<String> = conn_server.get_group_cloud_header(gid).await;
+            let infras_cloud_header: Option<String> = conn_server
+                .get_group_infra_cloud_header(gid, &client_info.mac)
+                .await;
+
+            let cloud_header: Option<String> =
+                cgw_construct_cloud_header(group_cloud_header, infras_cloud_header);
+
+            topology_map_item_data.sequence_number += 1;
+
+            let msg = cgw_construct_wired_client_join_msg(
+                gid,
+                client_info.mac,
+                node_mac,
+                client_info.port_name,
+                cloud_header,
+                topology_map_item_data.sequence_number,
+                timestamp,
+            );
+            if let Ok(r) = msg {
+                let _ = conn_server.enqueue_mbox_message_from_device_to_nb_api_c(
+                    gid,
+                    r,
+                    CGWKafkaProducerTopic::Topology,
+                );
+            } else {
+                warn!("Failed to convert wired client leave event to string!");
+            }
+        }
+    }
+
+    async fn handle_wired_clients_leave(
+        node_mac: MacAddress,
+        clients_list: WiredClientsLeaveList,
+        gid: i32,
+        topology_map_item_data: &mut TopologyMapItemData,
+        // TODO: remove this Arc:
+        // Dirty hack for now: pass Arc ref of srv to topomap;
+        // Future rework and refactoring would require to separate
+        // NB api from being an internal obj of conn_server to be a
+        // standalone (singleton?) object.
+        conn_server: Arc<CGWConnectionServer>,
+        timestamp: i64,
+    ) {
+        if clients_list.is_empty() {
+            return;
+        }
+
+        // We have AP mac, iterate only over keys - client macs
+        for client in clients_list {
+            let group_cloud_header: Option<String> = conn_server.get_group_cloud_header(gid).await;
+            let infras_cloud_header: Option<String> = conn_server
+                .get_group_infra_cloud_header(gid, &client.mac)
+                .await;
+
+            let cloud_header: Option<String> =
+                cgw_construct_cloud_header(group_cloud_header, infras_cloud_header);
+
+            topology_map_item_data.sequence_number += 1;
+
+            let msg = cgw_construct_wired_client_leave_msg(
+                gid,
+                client.mac,
+                node_mac,
+                client.port_name,
+                cloud_header,
+                topology_map_item_data.sequence_number,
+                timestamp,
+            );
+            if let Ok(r) = msg {
+                let _ = conn_server.enqueue_mbox_message_from_device_to_nb_api_c(
+                    gid,
+                    r,
+                    CGWKafkaProducerTopic::Topology,
+                );
+            } else {
+                warn!("Failed to convert client leave event to string!");
+            }
+        }
+    }
+
     // Process state message in an unblocking-manner as long as possible:
     //   * Function does a lot of unnecessary (on the first glance) cloning
     //     and allocations, but it's needed to make sure we block the topomap
@@ -900,18 +1115,27 @@ impl CGWUCentralTopologyMap {
                             // Don't care about _child_ nodes tracking for LLDP
                             // peers - create empty map.
                             CGWUCentralTopologyChildConnections::default(),
+                            CGWUCentralTopologyChildWiredConnections::default(),
                         ),
                     ));
                 }
             }
 
-            // List (map) of child nodes that are directly connected to the
+            // List (map) of Wireless child nodes that are directly connected to the
             // parent node that reports state event message.
             //
             // We need to catch any connected/disconnected/migrated events
             // based on this data.
             let mut new_connected_child_clients_map: CGWUCentralTopologyChildConnections =
                 CGWUCentralTopologyChildConnections::default();
+
+            // List (map) of Wired child nodes that are directly connected to the
+            // parent node that reports state event message.
+            //
+            // We need to catch any connected/disconnected events
+            // based on this data.
+            let mut new_connected_child_wired_clients_map: CGWUCentralTopologyChildWiredConnections =
+                CGWUCentralTopologyChildWiredConnections::default();
 
             for (local_port, links) in s.clients_data.links.into_iter() {
                 // Filled on a per-port basis.
@@ -970,6 +1194,21 @@ impl CGWUCentralTopologyMap {
                         } else if let CGWUCentralEventStateClientsType::Wired(ts) =
                             link_seen_on_port.client_type
                         {
+                            // We need to track on a port-agnostic level macs
+                            // of wired clients to easily track down the
+                            // disconnected/connected clients fast.
+                            if let CGWDeviceType::CGWDeviceAP = device_type {
+                                if let CGWUCentralEventStatePort::PhysicalWiredPort(ref port) =
+                                    local_port
+                                {
+                                    new_connected_child_wired_clients_map
+                                        .child_wired_connections_map
+                                        .insert(
+                                            link_seen_on_port.remote_serial,
+                                            WiredClientConnectedInfo::new(ts, port.clone()),
+                                        );
+                                }
+                            }
                             ts
                         } else {
                             s.timestamp
@@ -996,6 +1235,7 @@ impl CGWUCentralTopologyMap {
                     CGWUCentralTopologyMapNodeOrigin::UCentralDevice,
                     map_connections,
                     new_connected_child_clients_map,
+                    new_connected_child_wired_clients_map,
                 ),
             ));
 
@@ -1008,15 +1248,22 @@ impl CGWUCentralTopologyMap {
                         // track newly connected, disconnected or migrates
                         // events.
                         if let CGWDeviceType::CGWDeviceAP = device_type {
-                            // New connected clients (first time seen) client mac -> on AP mac,
+                            // New connected wireless clients (first time seen) client mac -> on AP mac,
                             // ssid, band
                             let mut clients_join_list: ClientsJoinList = Vec::new();
-                            // Disconnected clients (seen before, don't see now) client mac from -> AP mac, band
+                            // Disconnected wireless clients (seen before, don't see now) client mac from -> AP mac, band
                             let mut clients_leave_list: ClientsLeaveList = Vec::new();
-                            // Migrated client mac -> to (AP mac, ssid, band)
+                            // Migrated wireless client mac -> to (AP mac, ssid, band)
                             let mut clients_migrate_list: ClientsMigrateList = Vec::new();
 
+                            // New connected wired clients (first time seen) client mac -> on AP mac, port_name
+                            let mut wired_clients_join_list: WiredClientsJoinList = Vec::new();
+                            // Disconnected wired clients (seen before, don't see now) client mac from -> AP mac, port_name
+                            let mut wired_clients_leave_list: WiredClientsLeaveList = Vec::new();
+
                             let timestamp = cgw_get_timestamp_16_digits();
+
+                            /* Start of Wireless connect/disconnect/migrate events */
 
                             // We also have to iterate through wireless clients
                             // to detect client connect/disconnect/migrate events.
@@ -1164,7 +1411,115 @@ impl CGWUCentralTopologyMap {
                                     }
                                 }
                             }
+                            /* End of wireless connect/disconnect/migrate events */
 
+                            /* Start of Wired connect/disconnect events */
+
+                            // We also have to iterate through wired clients
+                            // to detect client connect/disconnect events.
+                            for (wired_client_mac, wired_client_connected_info) in node
+                                .node_data
+                                .wired_client_connections_list
+                                .child_wired_connections_map
+                                .iter()
+                            {
+                                if let Some(existing_client_info) = topology_map_data
+                                    .connected_wired_clients_map
+                                    .remove(wired_client_mac)
+                                {
+                                    // We found this client in our map - just update its information
+                                    // We don't generate any events here since the client was already connected
+
+                                    // If parent AP changed, we need to clean up the old AP's client list
+                                    if existing_client_info.parent_ap_mac != node.mac {
+                                        // Remove client from previous AP's client list
+                                        if let Some(ref mut old_clients_data) = topology_map_data
+                                            .data
+                                            .topology_nodes
+                                            .get_mut(&existing_client_info.parent_ap_mac)
+                                        {
+                                            let _ = old_clients_data
+                                                .wired_client_connections_list
+                                                .child_wired_connections_map
+                                                .remove(wired_client_mac);
+                                        }
+                                    }
+
+                                    // Update our tracking information
+                                    topology_map_data.connected_wired_clients_map.insert(
+                                        *wired_client_mac,
+                                        WiredClientParentInfo::new(
+                                            node.mac,
+                                            wired_client_connected_info.last_seen_timestamp,
+                                            wired_client_connected_info.port_name.clone(),
+                                        ),
+                                    );
+                                } else {
+                                    // Create new entry, generate connected event
+                                    topology_map_data.connected_wired_clients_map.insert(
+                                        *wired_client_mac,
+                                        WiredClientParentInfo::new(
+                                            node.mac,
+                                            wired_client_connected_info.last_seen_timestamp,
+                                            wired_client_connected_info.port_name.clone(),
+                                        ),
+                                    );
+                                    wired_clients_join_list.push(WiredClientJoinInfo::new(
+                                        *wired_client_mac,
+                                        wired_client_connected_info.port_name.clone(),
+                                    ));
+                                }
+                            }
+
+                            // Lastly, we have to detect disconnected wired clients
+                            // A client is disconnected if it was previously connected to this node
+                            // but is not in the current report
+                            if let Some(old_clients_data) =
+                                topology_map_data.data.topology_nodes.get(&node.mac)
+                            {
+                                for old_wired_client_mac in old_clients_data
+                                    .wired_client_connections_list
+                                    .child_wired_connections_map
+                                    .keys()
+                                {
+                                    // Skip if the client is still in the current report
+                                    if node
+                                        .node_data
+                                        .wired_client_connections_list
+                                        .child_wired_connections_map
+                                        .contains_key(old_wired_client_mac)
+                                    {
+                                        continue;
+                                    }
+
+                                    // Client is missing from current report but was in previous one
+                                    // Check if it's disconnected
+                                    if let Some(existing_client_info) = topology_map_data
+                                        .connected_wired_clients_map
+                                        .remove(old_wired_client_mac)
+                                    {
+                                        if existing_client_info.parent_ap_mac == node.mac {
+                                            // It was connected to this node but now is gone - disconnected event
+                                            wired_clients_leave_list.push(
+                                                WiredClientLeaveInfo::new(
+                                                    *old_wired_client_mac,
+                                                    existing_client_info.port_name,
+                                                ),
+                                            );
+                                        } else {
+                                            // Client appears to be connected to a different AP
+                                            // Put back the entry since we're not generating events for this case
+                                            topology_map_data.connected_wired_clients_map.insert(
+                                                *old_wired_client_mac,
+                                                existing_client_info,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            /* End of Wired connect/disconnect events */
+
+                            // Wireless
                             if !clients_join_list.is_empty() {
                                 Self::handle_clients_join(
                                     *topology_node_mac,
@@ -1199,6 +1554,31 @@ impl CGWUCentralTopologyMap {
                                 )
                                 .await;
                             }
+
+                            // Wired
+                            if !wired_clients_join_list.is_empty() {
+                                Self::handle_wired_clients_join(
+                                    *topology_node_mac,
+                                    wired_clients_join_list,
+                                    gid,
+                                    topology_map_data,
+                                    conn_server.clone(),
+                                    timestamp,
+                                )
+                                .await;
+                            }
+
+                            if !wired_clients_leave_list.is_empty() {
+                                Self::handle_wired_clients_leave(
+                                    *topology_node_mac,
+                                    wired_clients_leave_list,
+                                    gid,
+                                    topology_map_data,
+                                    conn_server.clone(),
+                                    timestamp,
+                                )
+                                .await;
+                            }
                         }
 
                         Self::add_node(
@@ -1208,6 +1588,7 @@ impl CGWUCentralTopologyMap {
                                 node.node_data.origin_node,
                                 node.node_data.connection_map,
                                 node.node_data.client_connections_list,
+                                node.node_data.wired_client_connections_list,
                             ),
                         );
                     } else {
@@ -1232,6 +1613,7 @@ impl CGWUCentralTopologyMap {
                                 node.node_data.origin_node,
                                 node.node_data.connection_map,
                                 node.node_data.client_connections_list,
+                                node.node_data.wired_client_connections_list,
                             ),
                         );
                     }

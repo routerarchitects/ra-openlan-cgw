@@ -245,6 +245,32 @@ pub struct APClientMigrateMessage {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct APWiredClientJoinMessage {
+    pub r#type: &'static str,
+    pub infra_group_id: i32,
+    pub client: MacAddress,
+    pub infra_group_infra: MacAddress,
+    pub port_name: String,
+    #[serde(default, rename = "cloud-header")]
+    pub cloud_header: Option<String>,
+    pub sequence_number: u64,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct APWiredClientLeaveMessage {
+    pub r#type: &'static str,
+    pub infra_group_id: i32,
+    pub client: MacAddress,
+    pub infra_group_infra: MacAddress,
+    pub port_name: String,
+    #[serde(default, rename = "cloud-header")]
+    pub cloud_header: Option<String>,
+    pub sequence_number: u64,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UCentralTopomapInfraJoin {
     pub r#type: &'static str,
     pub infra_group_id: i32,
@@ -647,7 +673,7 @@ pub fn cgw_construct_client_join_msg(
     timestamp: i64,
 ) -> Result<String> {
     let client_join_msg = APClientJoinMessage {
-        r#type: "ap_client_join",
+        r#type: "wireless_client_join",
         infra_group_id,
         client,
         infra_group_infra,
@@ -671,7 +697,7 @@ pub fn cgw_construct_client_leave_msg(
     timestamp: i64,
 ) -> Result<String> {
     let client_join_msg = APClientLeaveMessage {
-        r#type: "ap_client_leave",
+        r#type: "wireless_client_leave",
         infra_group_id,
         client,
         infra_group_infra,
@@ -695,7 +721,7 @@ pub fn cgw_construct_client_migrate_msg(
     timestamp: i64,
 ) -> Result<String> {
     let client_migrate_msg = APClientMigrateMessage {
-        r#type: "ap_client_migrate",
+        r#type: "wireless_client_migrate",
         infra_group_id,
         client,
         to_infra_group_infra_device,
@@ -707,6 +733,52 @@ pub fn cgw_construct_client_migrate_msg(
     };
 
     Ok(serde_json::to_string(&client_migrate_msg)?)
+}
+
+pub fn cgw_construct_wired_client_join_msg(
+    infra_group_id: i32,
+    client: MacAddress,
+    infra_group_infra: MacAddress,
+    port_name: String,
+    cloud_header: Option<String>,
+    sequence_number: u64,
+    timestamp: i64,
+) -> Result<String> {
+    let client_join_msg = APWiredClientJoinMessage {
+        r#type: "wired_client_join",
+        infra_group_id,
+        client,
+        infra_group_infra,
+        port_name,
+        cloud_header,
+        sequence_number,
+        timestamp,
+    };
+
+    Ok(serde_json::to_string(&client_join_msg)?)
+}
+
+pub fn cgw_construct_wired_client_leave_msg(
+    infra_group_id: i32,
+    client: MacAddress,
+    infra_group_infra: MacAddress,
+    port_name: String,
+    cloud_header: Option<String>,
+    sequence_number: u64,
+    timestamp: i64,
+) -> Result<String> {
+    let client_join_msg = APWiredClientLeaveMessage {
+        r#type: "wired_client_leave",
+        infra_group_id,
+        client,
+        infra_group_infra,
+        port_name,
+        cloud_header,
+        sequence_number,
+        timestamp,
+    };
+
+    Ok(serde_json::to_string(&client_join_msg)?)
 }
 
 pub fn cgw_construct_infra_join_msg(

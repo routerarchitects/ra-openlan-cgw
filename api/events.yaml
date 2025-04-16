@@ -208,7 +208,7 @@ infrastructure_group_infra_capabilities_changed:
       the event had been detected by the CGW.
     type: integer
 
-ap_client_join:
+wireless_client_join:
   description:
     Event, that CGW generates whenever it detects topology
     change - a new WiFi client connection.
@@ -216,7 +216,7 @@ ap_client_join:
     description: MANDATORY field. Type should be parsed by NB services for matching.
     type: string
     enum:
-    - ap_client_join
+    - wireless_client_join
   infra_group_id:
     description: MANDATORY field.
       Infrastructure group ID to which infra belongs to.
@@ -252,7 +252,7 @@ ap_client_join:
       the event had been detected by the CGW.
     type: integer
 
-ap_client_leave:
+wireless_client_leave:
   description:
     Event, that CGW generates whenever it detects topology
     change - a WiFi client disconnect.
@@ -260,7 +260,7 @@ ap_client_leave:
     description: MANDATORY field. Type should be parsed by NB services for matching.
     type: string
     enum:
-    - ap_client_leave
+    - wireless_client_leave
   infra_group_id:
     description: MANDATORY field.
       Infrastructure group ID to which infra belongs to.
@@ -292,7 +292,7 @@ ap_client_leave:
       the event had been detected by the CGW.
     type: integer
 
-ap_client_migrate:
+wireless_client_migrate:
   description:
     Event, that CGW generates whenever it detects topology
     change - existing WiFi client migrating from one infra to another
@@ -301,7 +301,7 @@ ap_client_migrate:
     description: MANDATORY field. Type should be parsed by NB services for matching.
     type: string
     enum:
-    - ap_client_migrate
+    - wireless_client_migrate
   infra_group_id:
     description: MANDATORY field.
       Infrastructure group ID to which infra belongs to.
@@ -326,6 +326,86 @@ ap_client_migrate:
     description: OPTIONAL field.
       The infrastructure group and infra cloud header.
       This field is optional and might be empty JSON object or missed.
+    type: string
+  sequence_number:
+    description: MANDATORY field.
+      Represent the sequence number of topology change.
+    type: integer
+  timestamp:
+    description: MANDATORY field.
+      (unix-epoch-time) 16 digits (microseconds) timestamp that indicates exact time
+      the event had been detected by the CGW.
+    type: integer
+
+wired_client_join:
+  description:
+    Event, that CGW generates whenever it detects topology
+    change - a new Wired client connection.
+  type:
+    description: MANDATORY field. Type should be parsed by NB services for matching.
+    type: string
+    enum:
+    - wired_client_join
+  infra_group_id:
+    description: MANDATORY field.
+      Infrastructure group ID to which infra belongs to.
+    type: integer
+  infra_group_infra:
+    description: MANDATORY field.
+      MAC (serial) of the infra that connected the WiFi ssid of the infra.
+    type: string
+  client:
+    description: MANDATORY field.
+      MAC (serial) of the infra client that joined.
+    type: string
+  port_name:
+    description: MANDATORY field.
+      Port on which the underlying infra client joined.
+    type: string
+  cloud-header:
+    description: OPTIONAL field.
+      The infrastructure group and infra cloud header.
+      This field might be empty JSON object or missed.
+    type: string
+  sequence_number:
+    description: MANDATORY field.
+      Represent the sequence number of topology change.
+    type: integer
+  timestamp:
+    description: MANDATORY field.
+      (unix-epoch-time) 16 digits (microseconds) timestamp that indicates exact time
+      the event had been detected by the CGW.
+    type: integer
+
+wired_client_leave:
+  description:
+    Event, that CGW generates whenever it detects topology
+    change - a Wired client disconnect.
+  type:
+    description: MANDATORY field. Type should be parsed by NB services for matching.
+    type: string
+    enum:
+    - wired_client_leave
+  infra_group_id:
+    description: MANDATORY field.
+      Infrastructure group ID to which infra belongs to.
+    type: integer
+  infra_group_infra:
+    description: MANDATORY field.
+      MAC (serial) of the infra that disconnected the WiFi ssid of the infra.
+    type: string
+  client:
+    description: MANDATORY field.
+      MAC (serial) of the infra client that disconnected.
+    type: string
+  port_name:
+    description: MANDATORY field.
+      Port on which the underlying infra client disconnected.
+    type: string
+  cloud-header:
+    description: OPTIONAL field.
+      The infrastructure group and infra cloud header.
+      This field might be empty JSON object or missed.
     type: string
   sequence_number:
     description: MANDATORY field.

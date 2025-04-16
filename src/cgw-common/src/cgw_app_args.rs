@@ -44,7 +44,7 @@ const CGW_DEFAULT_TOPOMAP_STATE: bool = false;
 const CGW_DEFAULT_NB_INFRA_TLS: &str = "no";
 const CGW_DEFAULT_UCENTRAL_AP_DATAMODEL_URI: &str = "https://raw.githubusercontent.com/Telecominfraproject/wlan-ucentral-schema/main/ucentral.schema.json";
 const CGW_DEFAULT_UCENTRAL_SWITCH_DATAMODEL_URI: &str = "https://raw.githubusercontent.com/Telecominfraproject/ols-ucentral-schema/main/ucentral.schema.json";
-const CGW_DEFAULT_PROXY_MODE: &str = "yes";
+const CGW_DEFAULT_PROXY_MODE: &str = "no";
 
 pub struct CGWWSSArgs {
     /// Number of thread in a threadpool dedicated for handling secure websocket connections
