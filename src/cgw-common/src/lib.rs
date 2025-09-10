@@ -11,6 +11,7 @@ use nix::sys::socket::{setsockopt, sockopt};
 use std::os::unix::io::AsFd;
 use std::str::FromStr;
 use std::sync::Arc;
+//use std::time::Duration;
 use tokio::{net::TcpStream, signal, sync::Notify};
 
 use cgw_errors::{Error, Result};
@@ -86,6 +87,9 @@ pub async fn cgw_set_tcp_keepalive_options(stream: TcpStream) -> Result<TcpStrea
         return Err(Error::Tcp("Failed to enable TCP keepalive".to_string()));
     }
 
+    // NOTE that in newer RUST versions the setsockopts below don't work anymore,
+    // so we need to use a different method. Something like this perhaps?
+    //stream.set_keepalive(Some(Duration::from_secs(CGW_TCP_KEEPALIVE_TIMEOUT)))?;
     // Set the TCP_KEEPIDLE option (keepalive time)
     if let Err(e) = setsockopt(&raw_fd, sockopt::TcpKeepIdle, &CGW_TCP_KEEPALIVE_TIMEOUT) {
         error!("Failed to set TCP_KEEPIDLE: {}", e);

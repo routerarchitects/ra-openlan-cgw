@@ -136,7 +136,8 @@ impl AppCore {
 }
 
 async fn server_loop(app_core: Arc<AppCore>) -> Result<()> {
-    debug!("server_loop entry");
+    let seq = 4;
+    debug!("CS server_loop entry {}", seq);
 
     debug!(
         "Starting WSS server, listening at {}:{}",
@@ -147,6 +148,7 @@ async fn server_loop(app_core: Arc<AppCore>) -> Result<()> {
         std::net::IpAddr::V4(app_core.args.wss_args.wss_ip),
         app_core.args.wss_args.wss_port,
     );
+    debug!("binding...");
     let listener: Arc<TcpListener> = match TcpListener::bind(sockaddress).await {
         Ok(listener) => Arc::new(listener),
         Err(e) => {
@@ -157,6 +159,7 @@ async fn server_loop(app_core: Arc<AppCore>) -> Result<()> {
         }
     };
 
+    debug!("create acceptor...");
     let tls_acceptor = match cgw_tls_create_acceptor(&app_core.args.wss_args).await {
         Ok(acceptor) => acceptor,
         Err(e) => {
@@ -165,6 +168,7 @@ async fn server_loop(app_core: Arc<AppCore>) -> Result<()> {
         }
     };
 
+    debug!("spawn task...");
     // Spawn explicitly in main thread: created task accepts connection,
     // but handling is spawned inside another threadpool runtime
     let app_core_clone = app_core.clone();
@@ -185,6 +189,7 @@ async fn server_loop(app_core: Arc<AppCore>) -> Result<()> {
                         continue;
                     }
                 };
+                debug!("PreAccept (ACK) connection: {conn_idx}, remote address: {remote_addr}");
 
                 let socket = match cgw_set_tcp_keepalive_options(socket).await {
                     Ok(s) => s,
@@ -222,8 +227,8 @@ async fn server_loop(app_core: Arc<AppCore>) -> Result<()> {
 
 fn setup_logger(log_level: AppCoreLogLevel) {
     match log_level {
-        AppCoreLogLevel::Debug => ::std::env::set_var("RUST_LOG", "ucentral_cgw=debug"),
-        AppCoreLogLevel::Info => ::std::env::set_var("RUST_LOG", "ucentral_cgw=info"),
+        AppCoreLogLevel::Debug => ::std::env::set_var("RUST_LOG", "ucentral_cgw=debug,cgw_common=debug"),
+        AppCoreLogLevel::Info => ::std::env::set_var("RUST_LOG", "ucentral_cgw=info,cgw_common=info"),
     }
     env_logger::init();
 }

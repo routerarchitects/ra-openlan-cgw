@@ -3383,35 +3383,46 @@ impl CGWConnectionServer {
         self.wss_rx_tx_runtime.spawn(async move {
             if !server_clone.proxy_mode {
                 // Non-proxy mode: Accept the TLS connection
+                debug!("Starting TLS handshake with client from {}", addr);
                 let (client_cn, tls_stream) = match tls_acceptor.accept(stream).await {
-                    Ok(stream) => match cgw_tls_get_cn_from_stream(&stream).await {
-                        Ok(cn) => (cn, stream),
-                        Err(e) => {
-                            error!("Failed to read client CN! Error: {e}");
-                            return;
+                    Ok(stream) => {
+                        debug!("TLS handshake successful with {}", addr);
+                        match cgw_tls_get_cn_from_stream(&stream).await {
+                            Ok(cn) => {
+                                info!("TLS connection established with client CN: {} from {}", cn, addr);
+                                (cn, stream)
+                            },
+                            Err(e) => {
+                                error!("TLS handshake succeeded but failed to read client CN from {}! Error: {e}", addr);
+                                return;
+                            }
                         }
                     },
                     Err(e) => {
-                        error!("Failed to accept connection: Error {e}");
+                        error!("TLS handshake failed with {}! Error: {e:?}", addr);
                         return;
                     }
                 };
 
                 // Accept websocket connection from TLS stream
+                debug!("Starting WebSocket handshake with client CN: {} from {}", client_cn, addr);
                 let ws_stream = tokio::select! {
                     _val = tokio_tungstenite::accept_async(tls_stream) => {
                         match _val {
-                            Ok(s) => s,
+                            Ok(s) => {
+                                info!("WebSocket connection established with client CN: {} from {}", client_cn, addr);
+                                s
+                            },
                             Err(e) => {
-                                error!("Failed to accept TLS stream from: {}! Reason: {}. Closing connection",
-                                       addr, e);
+                                error!("Failed to accept WebSocket connection from client CN: {} at {}! Reason: {}. Closing connection",
+                                       client_cn, addr, e);
                                 return;
                             }
                         }
                     }
                     // TODO: configurable duration (upon server creation)
                     _val = sleep(Duration::from_millis(15000)) => {
-                        error!("Failed to accept TLS stream from: {}! Closing connection", addr);
+                        error!("WebSocket handshake timeout for client CN: {} from {}! Closing connection", client_cn, addr);
                         return;
                     }
                 };

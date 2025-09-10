@@ -136,62 +136,153 @@ pub async fn cgw_tls_get_cn_from_stream(stream: &TlsStream<TcpStream>) -> Result
 }
 
 pub async fn cgw_tls_create_acceptor(wss_args: &CGWWSSArgs) -> Result<TlsAcceptor> {
+    info!("Creating TLS acceptor with mTLS configuration");
+
     // Read root/issuer certs.
     let cas_path = format!("{}/{}", CGW_TLS_CERTIFICATES_PATH, wss_args.wss_cas);
+    debug!("Loading CA certificates from: {}", cas_path);
     let cas = match cgw_tls_read_certs(cas_path.as_str()).await {
-        Ok(cas_pem) => cas_pem,
+        Ok(cas_pem) => {
+            info!("Successfully loaded {} CA certificates", cas_pem.len());
+            cas_pem
+        },
         Err(e) => {
-            error!("{e}");
+            error!("Failed to load CA certificates from {}: {}", cas_path, e);
             return Err(e);
         }
     };
 
     // Read cert.
     let cert_path = format!("{}/{}", CGW_TLS_CERTIFICATES_PATH, wss_args.wss_cert);
+    debug!("Loading server certificate from: {}", cert_path);
     let mut cert = match cgw_tls_read_certs(cert_path.as_str()).await {
-        Ok(cert_pem) => cert_pem,
+        Ok(cert_pem) => {
+            info!("Successfully loaded server certificate chain ({} certificates)", cert_pem.len());
+            cert_pem
+        },
         Err(e) => {
-            error!("{e}");
+            error!("Failed to load server certificate from {}: {}", cert_path, e);
             return Err(e);
         }
     };
     cert.extend(cas.clone());
+    debug!("Total certificate chain length: {} certificates", cert.len());
 
     // Read private key.
     let key_path = format!("{}/{}", CGW_TLS_CERTIFICATES_PATH, wss_args.wss_key);
+    debug!("Loading server private key from: {}", key_path);
     let key = match cgw_tls_read_private_key(key_path.as_str()).await {
-        Ok(private_key) => private_key,
+        Ok(private_key) => {
+            info!("Successfully loaded server private key");
+            private_key
+        },
         Err(e) => {
-            error!("{e}");
+            error!("Failed to load private key from {}: {}", key_path, e);
             return Err(e);
         }
     };
 
     // Create the client certs verifier.
     let mut roots = RootCertStore::empty();
-    roots.add_parsable_certificates(cas);
+    roots.add_parsable_certificates(cas.clone());
 
+    // Debug dump all entries in roots in detail
+    debug!("Root certificate store contains {} certificates", roots.len());
+    for (index, cert_der) in cas.iter().enumerate() {
+        match parse_x509_certificate(cert_der.as_ref()) {
+            Ok((_, cert)) => {
+                debug!("Root CA certificate #{}", index + 1);
+                debug!("  Subject: {}", cert.subject());
+                debug!("  Issuer: {}", cert.issuer());
+                debug!("  Serial: {}", cert.serial.to_string());
+                debug!("  Not Before: {}", cert.validity.not_before);
+                debug!("  Not After: {}", cert.validity.not_after);
+
+                // Extract Common Name
+                for cn in cert.subject().iter_common_name() {
+                    if let Ok(cn_str) = cn.as_str() {
+                        debug!("  Subject CN: {}", cn_str);
+                    }
+                }
+
+                // Extract Subject Alternative Names if present
+                if let Ok(Some(san_ext)) = cert.subject_alternative_name() {
+                    debug!("  Subject Alternative Names:");
+                    for san in &san_ext.value.general_names {
+                        debug!("    - {:?}", san);
+                    }
+                }
+
+                // Key usage
+                if let Ok(Some(key_usage)) = cert.key_usage() {
+                    debug!("  Key Usage: {:?}", key_usage.value);
+                }
+
+                // Extended key usage
+                if let Ok(Some(ext_key_usage)) = cert.extended_key_usage() {
+                    debug!("  Extended Key Usage:");
+                    if ext_key_usage.value.any {
+                        debug!("    - Any");
+                    }
+                    if ext_key_usage.value.server_auth {
+                        debug!("    - Server Authentication");
+                    }
+                    if ext_key_usage.value.client_auth {
+                        debug!("    - Client Authentication");
+                    }
+                    if ext_key_usage.value.code_signing {
+                        debug!("    - Code Signing");
+                    }
+                    if ext_key_usage.value.email_protection {
+                        debug!("    - Email Protection");
+                    }
+                    if ext_key_usage.value.time_stamping {
+                        debug!("    - Time Stamping");
+                    }
+                    if ext_key_usage.value.ocsp_signing {
+                        debug!("    - OCSP Signing");
+                    }
+                    for oid in &ext_key_usage.value.other {
+                        debug!("    - Other: {}", oid);
+                    }
+                }
+            }
+            Err(e) => {
+                debug!("Failed to parse root certificate #{}: {}", index + 1, e);
+            }
+        }
+    }
+
+    info!("Building WebPKI client certificate verifier with {} root certificates", roots.len());
     let client_verifier = match WebPkiClientVerifier::builder(Arc::new(roots)).build() {
-        Ok(verifier) => verifier,
+        Ok(verifier) => {
+            info!("Successfully created client certificate verifier");
+            verifier
+        },
         Err(e) => {
-            error!("Failed to build client verifier! Error: {e}");
-            return Err(Error::Tls("Failed to build client verifier!".to_string()));
+            error!("Failed to build client verifier! Error: {e:?}");
+            return Err(Error::Tls(format!("Failed to build client verifier: {e}")));
         }
     };
 
     // Create server config.
+    info!("Creating TLS server configuration with mTLS enabled");
     let config = match ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
         .with_single_cert(cert, key)
     {
-        Ok(server_config) => server_config,
+        Ok(server_config) => {
+            info!("Successfully created TLS server configuration");
+            server_config
+        },
         Err(e) => {
-            error!("Failed to build server config! Error: {e}");
-            return Err(Error::Tls("Failed to build server config!".to_string()));
+            error!("Failed to build server config! Error: {e:?}");
+            return Err(Error::Tls(format!("Failed to build server config: {e}")));
         }
     };
 
     // Create the TLS acceptor.
+    info!("TLS acceptor created successfully with mTLS enforcement");
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
