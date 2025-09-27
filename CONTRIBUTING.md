@@ -18,6 +18,7 @@ Contributor License Agreement (CLA)
 Before we can accept your pull request, you must agree to our CLA:
 
 Individual contributors: CLA-Individual.md
+
 Corporate contributors (on behalf of your employer): CLA-Corporate.md
 
 By signing the CLA, you:
