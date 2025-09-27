@@ -21,8 +21,8 @@ Before we can accept your pull request, you must agree to our CLA:
 
 ## Corporate contributors (on behalf of your employer): CLA-Corporate.md
 If you are contributing on behalf of your employer:
-1. Please ensure your organization has signed the Corporate CLA ([CLA-Corporate.md]).
-2. Provide the GitHub usernames of authorized contributors to Router Architects so they can be whitelisted.
+1. Please ensure your organization has signed the Corporate CLA ([CLA-Corporate.md]). Please sign and email it support@routerarchitects.com
+2. Provide the GitHub usernames of authorized contributors to Router Architects so they can be whitelisted in the email.
 3. Once authorized, contributions will be automatically marked as CLA-signed.
 
 By signing the CLA, you:
