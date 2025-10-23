@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 use crate::{
     cgw_app_args::CGWRedisArgs,
     cgw_db_accessor::{CGWDBAccessor, CGWDBInfra, CGWDBInfrastructureGroup},
@@ -1348,6 +1353,58 @@ impl CGWRemoteDiscovery {
         Ok(infras_assigned)
     }
 
+    /// \brief Remove a device entry from every shard-specific Redis cach(db1).
+    /// \param device_mac Device MAC address used as the Redis cache key suffix.
+    /// \return `Ok` when the deletion succeeds or the device was absent, `Err` on Redis failures.
+    pub async fn del_device_from_all_shards_redis_cache(
+        &self,
+        device_mac: &MacAddress,
+    ) -> Result<()> {
+        let mut con = self.redis_infra_cache_client.clone();
+
+        let pattern = format!("shard_id_*|{}", device_mac);
+        let keys: Vec<String> = match redis::cmd("KEYS").arg(&pattern).query_async(&mut con).await
+        {
+            Ok(keys) => keys,
+            Err(e) => {
+                if e.is_io_error() {
+                    Self::set_redis_health_state_not_ready(e.to_string()).await;
+                }
+                warn!(
+                    "Failed to query Redis for device {} keys! Error: {e}",
+                    device_mac.to_hex_string()
+                );
+                return Err(Error::RemoteDiscovery(
+                    "Failed to update Redis devices cache",
+                ));
+            }
+        };
+
+        if !keys.is_empty() {
+            let res: RedisResult<()> = redis::cmd("DEL").arg(&keys).query_async(&mut con).await;
+
+            match res {
+                Ok(_) => debug!(
+                    "Removed device {} from Redis cache (all shards)",
+                    device_mac
+                ),
+                Err(e) => {
+                    if e.is_io_error() {
+                        Self::set_redis_health_state_not_ready(e.to_string()).await;
+                    }
+                    warn!(
+                        "Failed to remove device {} from Redis cache! Error: {e}",
+                        device_mac.to_hex_string()
+                    );
+                    return Err(Error::RemoteDiscovery(
+                        "Failed to update Redis devices cache",
+                    ));
+                }
+            };
+        }
+
+        Ok(())
+    }
     pub async fn add_device_to_redis_cache(
         &self,
         device_mac: &MacAddress,
@@ -1401,6 +1458,70 @@ impl CGWRemoteDiscovery {
         };
 
         Ok(())
+    }
+
+    /// \brief Resolve the group identifier for a device from Redis cache entries(db1).
+    /// \param device_mac Device MAC address used to filter shard keys.
+    /// \return Group parsed from the cached device JSON, or `None` when missing.
+    pub async fn get_device_group_id_from_redis(&self, device_mac: &MacAddress) -> Option<i32> {
+        let mut con = self.redis_infra_cache_client.clone();
+
+        let key = format!("shard_id_*|{}", device_mac);
+        let redis_keys: Vec<String> = match redis::cmd("KEYS").arg(&key).query_async(&mut con).await
+        {
+            Err(e) => {
+                if e.is_io_error() {
+                    Self::set_redis_health_state_not_ready(e.to_string()).await;
+                }
+                error!(
+                    "Failed to get device {} from Redis cache! Error: {}",
+                    device_mac.to_hex_string(),
+                    e
+                );
+                return None;
+            }
+            Ok(keys) => keys,
+        };
+
+        if let Some(first_key) = redis_keys.first() {
+            let device_str: String =
+                match redis::cmd("GET").arg(first_key).query_async(&mut con).await {
+                    Ok(dev) => dev,
+                    Err(e) => {
+                        if e.is_io_error() {
+                            Self::set_redis_health_state_not_ready(e.to_string()).await;
+                        }
+                        error!(
+                            "Failed to get device cache entry {}! Error: {}",
+                            first_key, e
+                        );
+                        return None;
+                    }
+                };
+
+            match serde_json::from_str::<CGWDevice>(&device_str) {
+                Ok(dev) => Some(dev.get_device_group_id()),
+                Err(e) => {
+                    error!("Failed to deserialize device from Redis cache! Error: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+
+    /// \brief Determine the device group identifier using Redis first and PostgreSQL as fallback.
+    /// \param mac Device MAC address to resolve.
+    /// \return Group from Redis or the database, or `None` when neither contains the device.
+    pub async fn get_device_group_id(&self, mac: &MacAddress) -> Option<i32> {
+        if let Some(gid) = self.get_device_group_id_from_redis(mac).await {
+            info!("Found group_id {} from Redis for device {}", gid, mac.to_hex_string());
+                return Some(gid);
+            }
+
+        self.db_accessor.get_infra_group_id_by_mac(*mac).await
     }
 
     pub async fn sync_devices_cache_with_redis(
