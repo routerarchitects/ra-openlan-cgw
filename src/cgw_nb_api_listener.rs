@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 use crate::cgw_app_args::CGWKafkaArgs;
 use crate::cgw_device::OldNew;
 use crate::cgw_ucentral_parser::CGWDeviceChange;
@@ -22,11 +27,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc,Weak};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::{
     runtime::{Builder, Runtime},
     sync::mpsc::UnboundedSender,
-    time::Duration,
+    time::{Duration, sleep},
 };
 use uuid::Uuid;
 
@@ -493,6 +499,7 @@ struct CGWConsumerContextData {
     // consumer (to retrieve patition num) whenever
     // client->context rebalance callback is being called.
     consumer_client: Option<Arc<CGWCNCConsumerType>>,
+    nb_api_client: Option<Weak<CGWNBApiClient>>,
 }
 
 struct CustomContext {
@@ -642,6 +649,24 @@ impl ConsumerContext for CustomContext {
 
                         ctx.recalculate_partition_to_key_mapping(partition_num);
                     }
+                    //The leader shard is that, which has been assigned kafka partition 0,
+                    //And it will publish rebalance message on CnC topic. 
+                    let is_leader = ctx.assigned_partition_list.iter().any(|p| *p == 0);
+                    let nb_client_opt = ctx.nb_api_client.clone();
+
+                    if is_leader {
+                        if let Some(nb_client_weak) = nb_client_opt {
+                            if let Some(nb_client) = nb_client_weak.upgrade() {
+                                tokio::spawn(async move {
+                                    nb_client.publish_leader_rebalance_groups().await;
+                                });
+                            } else {
+                                info!("CGW consumer became group leader but NB API client is unavailable");
+                            }
+                        } else {
+                            info!("CGW consumer became group leader but NB API client is unavailable");
+                        }
+                    }
                 } else {
                     warn!("Tried to fetch consumer metadata but failed. CGW will not be able to reply with optimized Kafka key for efficient routing!");
                 }
@@ -680,6 +705,7 @@ impl ConsumerContext for CustomContext {
 static GROUP_ID: &str = "CGW";
 const CONSUMER_TOPICS: [&str; 1] = ["CnC"];
 const PRODUCER_TOPICS: &str = "CnC_Res";
+const PRODUCER_CNCTOPIC: &str = "CnC";
 
 struct CGWCNCProducer {
     p: CGWCNCProducerType,
@@ -703,6 +729,7 @@ impl CGWCNCConsumer {
                 last_used_key_idx: 0u32,
                 partition_num: 0usize,
                 consumer_client: None,
+                nb_api_client: None,
             }),
         };
 
@@ -816,6 +843,9 @@ impl CGWNBApiClient {
             consumer: consumer_clone,
         });
 
+        if let Ok(mut ctx) = cl.consumer.c.context().ctx_data.write() {
+            ctx.nb_api_client = Some(Arc::downgrade(&cl));
+        }
         let cl_clone = cl.clone();
         cl.working_runtime_handle.spawn(async move {
             loop {
@@ -898,6 +928,53 @@ impl CGWNBApiClient {
         }
     }
 
+    /// \brief Publish a message on CnC topic a short delay.
+    /// \param key Kafka partitioning key 
+    /// \param payload Serialized message 
+    pub async fn enqueue_mbox_message_from_cgw_server_to_topic(
+        &self,
+        key: String,
+        payload: String,
+    ) {
+        sleep(Duration::from_secs(40)).await;
+        let produce_future = self
+            .prod
+            .p
+            .send(
+                FutureRecord::to(PRODUCER_CNCTOPIC)
+                    .key(&key)
+                    .payload(&payload),
+                Duration::from_secs(0),
+            );
+
+        if let Err((e, _)) = produce_future.await {
+            error!("{e}")
+        } else {
+            info!("Message published to topic {PRODUCER_CNCTOPIC},Payload:{payload}");
+        }
+    }
+
+    /// \brief Trigger a rebalance notification by enqueuing a predefined rebalance message with unique uuid.
+    pub async fn publish_leader_rebalance_groups(&self) {
+        sleep(Duration::from_secs(40)).await;
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let uuid_str = format!("6c59d058-1902-11ef-b0a0-2b{:010x}", epoch);
+        let uuid = Uuid::parse_str(&uuid_str).unwrap_or_else(|_| Uuid::nil());
+        let key = uuid.to_string();
+        let payload = serde_json::json!({
+            "type": "rebalance_groups",
+            "infra_group_id": "0",
+            "uuid": uuid,
+        })
+        .to_string();
+
+        self.enqueue_mbox_message_from_cgw_server_to_topic(key, payload)
+            .await;
+        info!("Published leader rebalance_groups message");
+    }
     async fn enqueue_mbox_message_to_cgw_server(&self, key: String, payload: String) {
         debug!("MBOX_OUT: EnqueueNewMessageFromNBAPIListener, key: {key}");
         let msg = CGWConnectionNBAPIReqMsg::EnqueueNewMessageFromNBAPIListener(

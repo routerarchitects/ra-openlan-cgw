@@ -363,4 +363,31 @@ impl CGWDBAccessor {
             }
         }
     }
+    /// \brief Count infras belonging to the provided group id in PostgreSQL.
+    /// \param gid infrastructure_group identifier to count members for.
+    /// \return Number of infras assigned to the group.
+    pub async fn get_infras_count_by_group(&self, gid: i32) -> Result<i32> {
+        let q = match self
+            .cl
+            .prepare("SELECT COUNT(*) FROM infras WHERE infra_group_id = $1")
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to prepare query to get infras count for gid {gid}! Error: {e}");
+                return Err(Error::DbAccessor("Failed to get infras count"));
+            }
+        };
+
+        let row = match self.cl.query_one(&q, &[&gid]).await {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Failed to get infras count for gid {gid}! Error: {e}");
+                return Err(Error::DbAccessor("Failed to get infras count"));
+            }
+        };
+
+        let count: i64 = row.get(0);
+        Ok(count as i32)
+    }
 }

@@ -33,7 +33,7 @@ use redis::{
 
 use eui48::MacAddress;
 
-use tokio::sync::RwLock;
+use tokio::{sync::RwLock, time};
 
 use chrono::Utc;
 
@@ -50,6 +50,8 @@ static REDIS_KEY_GID_VALUE_INFRAS_CAPACITY: &str = "infras_capacity";
 static REDIS_KEY_GID_VALUE_INFRAS_ASSIGNED: &str = "infras_assigned";
 
 const CGW_REDIS_DEVICES_CACHE_DB: u32 = 1;
+const REDIS_SHARD_TTL_SEC: u64 = 30;
+const REDIS_SHARD_HEARTBEAT_INTERVAL_SEC: u64 = 15;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CGWREDISDBShard {
@@ -360,9 +362,10 @@ impl CGWRemoteDiscovery {
 
         let redis_req_data: Vec<String> = redisdb_shard_info.into();
         let mut con = rc.redis_client.clone();
+        let shard_key = format!("{REDIS_KEY_SHARD_ID_PREFIX}{}", app_args.cgw_id);
 
         let res: RedisResult<()> = redis::cmd("DEL")
-            .arg(format!("{REDIS_KEY_SHARD_ID_PREFIX}{}", app_args.cgw_id))
+            .arg(&shard_key)
             .query_async(&mut con)
             .await;
         if let Err(e) = res {
@@ -373,7 +376,7 @@ impl CGWRemoteDiscovery {
         }
 
         let res: RedisResult<()> = redis::cmd("HSET")
-            .arg(format!("{REDIS_KEY_SHARD_ID_PREFIX}{}", app_args.cgw_id))
+            .arg(&shard_key)
             .arg(redis_req_data.to_redis_args())
             .query_async(&mut con)
             .await;
@@ -387,6 +390,39 @@ impl CGWRemoteDiscovery {
             ));
         }
 
+        /*
+        Setting Expiration time on every-shard creation
+       */
+        let res: RedisResult<()> = redis::cmd("EXPIRE")
+            .arg(&shard_key)
+            .arg(REDIS_SHARD_TTL_SEC.to_string())
+            .query_async(&mut con)
+            .await;
+        if let Err(e) = res {
+            if e.is_io_error() {
+                Self::set_redis_health_state_not_ready(e.to_string()).await;
+            }
+            error!("Can't create CGW Remote Discovery client! Failed to set shard TTL in REDIS! Error: {e}");
+            return Err(Error::RemoteDiscovery("Failed to set shard TTL in REDIS"));
+        }
+
+        let mut hb_con = rc.redis_client.clone();
+        let hb_key = shard_key.clone();
+        tokio::spawn(async move {
+            let mut interval =
+                time::interval(Duration::from_secs(REDIS_SHARD_HEARTBEAT_INTERVAL_SEC));
+            loop {
+                interval.tick().await;
+                let res: RedisResult<()> = redis::cmd("EXPIRE")
+                    .arg(&hb_key)
+                    .arg(REDIS_SHARD_TTL_SEC.to_string())
+                    .query_async(&mut hb_con)
+                    .await;
+                if let Err(e) = res {
+                    warn!("Failed to refresh shard TTL: {e}");
+                }
+            }
+        });
         if let Err(e) = rc.sync_gid_to_cgw_map().await {
             error!(
                 "Can't create CGW Remote Discovery client! Failed to sync GID to CGW map! Error: {e}"
@@ -1242,12 +1278,18 @@ impl CGWRemoteDiscovery {
             }
 
             let infras_assigned: i32 = match self.get_group_infras_assigned_num(i.id).await {
-                Ok(infras_num) => infras_num,
+                Ok(num) => num,
                 Err(e) => {
-                    warn!("Failed to execute rebalancing! Error: {e}");
-                    return Err(Error::RemoteDiscovery(
-                        "Cannot do rebalancing due to absence of any groups created in DB",
-                    ));
+                    warn!("Failed to get infras count from Redis for gid {}! Error: {e}", i.id);
+                    match self.db_accessor.get_infras_count_by_group(i.id).await {
+                        Ok(num) => num,
+                        Err(db_e) => {
+                            warn!("Failed to get infras count from DB for gid {}! Error: {db_e}", i.id);
+                            return Err(Error::RemoteDiscovery(
+                                "Cannot do rebalancing due to absence of any groups created in DB",
+                            ));
+                        }
+                    }
                 }
             };
 
