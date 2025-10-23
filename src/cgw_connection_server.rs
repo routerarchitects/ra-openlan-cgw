@@ -467,6 +467,74 @@ impl CGWConnectionServer {
         });
     }
 
+    /// \brief Drop connections to devices owned by other CGW shards and notify NB API.
+    /// \details Walks the local cache to find devices whose infra group is managed by a different CGW,
+    /// constructs a `foreign_infra_connection` and publish on CnC_Res, schedules the device connection to close,
+    /// Remove stale entries from redis
+    async fn disconnect_foreign_devices(&self) {
+        let mut devices: Vec<(MacAddress, i32)> = Vec::new();
+        {
+            let cache_lock = self.devices_cache.read().await;
+            for (mac, dev) in cache_lock.iter() {
+                devices.push((*mac, dev.get_device_group_id()));
+            }
+        }
+
+        for (mac, gid) in devices {
+            if gid == 0 {
+                continue;
+            }
+
+            if let Some(owner_id) = self
+                .cgw_remote_discovery
+                .get_infra_group_owner_id(gid)
+                .await
+            {
+                if owner_id != self.local_cgw_id {
+                    if let Ok(resp) = cgw_construct_foreign_infra_connection_msg(
+                        gid,
+                        mac,
+                        self.local_cgw_id,
+                        owner_id,
+                    ) {
+                        self.enqueue_mbox_message_from_cgw_to_nb_api(gid, resp);
+                    } else {
+                        error!("Failed to construct foreign_infra_connection message!");
+                    }
+
+                    let tx_opt = {
+                        let connmap_lock = self.connmap.map.read().await;
+                        connmap_lock.get(&mac).cloned()
+                    };
+
+                    if let Some(tx) = tx_opt {
+                        let msg = CGWConnectionProcessorReqMsg::AddNewConnectionShouldClose;
+                        if let Err(e) = tx.send(msg) {
+                            warn!(
+                                "Failed to send disconnection request for {}! Error: {e}",
+                                mac.to_hex_string()
+                            );
+                        }
+                    }
+                    {
+                        let mut cache_lock = self.devices_cache.write().await;
+                        if let Some(device) = cache_lock.get_device_mut(&mac) {
+                            device.set_device_remains_in_db(true);
+                        }
+                        cache_lock.del_device(&mac);
+                    }
+                       if let Err(e) = self
+                        .cgw_remote_discovery
+                        .del_device_from_redis_cache(&mac)
+                        .await
+                    {
+                        error!("{e}");
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn enqueue_mbox_relayed_message_to_cgw_server(&self, key: String, req: String) {
         let msg = CGWConnectionNBAPIReqMsg::EnqueueNewMessageFromNBAPIListener(
             key,
@@ -721,6 +789,7 @@ impl CGWConnectionServer {
                             error!("Failed to sync Device cache! Error: {e}");
                         }
 
+                        self.disconnect_foreign_devices().await;
                         last_update_timestamp = current_timestamp;
                     }
                 }
