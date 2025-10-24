@@ -372,6 +372,7 @@ impl CGWConnectionProcessor {
                                 pending_req_id,
                                 true,
                                 None,
+                                Some(payload.clone()),
                             ) {
                                 self.cgw_server
                                     .enqueue_mbox_message_from_cgw_to_nb_api(self.group_id, resp);
@@ -627,6 +628,7 @@ impl CGWConnectionProcessor {
                             Some(format!(
                                 "Reques flushed from infra queue {device_mac} due to previous request timeout!"
                             )),
+                            None,
                         ) {
                             // Currently Device Queue Manager does not store infars GID
                             self.cgw_server
@@ -651,6 +653,7 @@ impl CGWConnectionProcessor {
                         pending_req_id,
                         false,
                         Some(format!("Request timed out")),
+                        None,
                     ) {
                         self.cgw_server
                             .enqueue_mbox_message_from_cgw_to_nb_api(self.group_id, resp);

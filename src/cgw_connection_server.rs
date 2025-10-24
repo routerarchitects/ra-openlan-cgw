@@ -2177,6 +2177,7 @@ impl CGWConnectionServer {
                         req.1.command.id,
                         false,
                         Some(format!("Request failed due to infra {} disconnect", infra)),
+                        None,
                     ) {
                         self.enqueue_mbox_message_from_cgw_to_nb_api(req.0, resp);
                     } else {

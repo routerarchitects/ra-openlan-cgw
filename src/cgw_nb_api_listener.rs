@@ -102,6 +102,8 @@ pub struct InfraGroupInfraRequestResult {
     pub id: u64,
     pub success: bool,
     pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub received_payload: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -460,6 +462,7 @@ pub fn cgw_construct_infra_request_result_msg(
     id: u64,
     success: bool,
     error_message: Option<String>,
+    received_payload: Option<String>,
 ) -> Result<String> {
     let infra_request_result = InfraGroupInfraRequestResult {
         r#type: "infra_request_result",
@@ -468,6 +471,7 @@ pub fn cgw_construct_infra_request_result_msg(
         id,
         success,
         error_message,
+        received_payload,
     };
 
     Ok(serde_json::to_string(&infra_request_result)?)

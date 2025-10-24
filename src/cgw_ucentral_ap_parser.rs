@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 use base64::prelude::*;
 use eui48::MacAddress;
 use flate2::read::ZlibDecoder;
@@ -895,12 +900,15 @@ pub fn cgw_ucentral_ap_parse_message(
         }
     } else if map.contains_key("result") {
         if let Value::Object(result) = &map["result"] {
-            if !result.contains_key("id") {
-                warn!("Received JRPC <result> without id!");
-                return Err(Error::UCentralParser("Received JRPC <result> without id"));
-            }
+            let id_value = result
+                .get("id")
+                .or_else(|| map.get("id"))
+                .ok_or_else(|| {
+                    warn!("Received JRPC <result> without id!");
+                    Error::UCentralParser("Received JRPC <result> without id")
+                })?;
 
-            let id = result["id"]
+            let id = id_value
                 .as_u64()
                 .ok_or_else(|| Error::UCentralParser("Failed to parse id"))?;
             let reply_event = CGWUCentralEvent {
