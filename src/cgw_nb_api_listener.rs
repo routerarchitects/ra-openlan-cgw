@@ -175,6 +175,7 @@ pub struct InfraJoinMessage {
     pub infra_group_infra: MacAddress,
     pub infra_public_ip: SocketAddr,
     pub reporter_shard_id: i32,
+    pub connect_message_payload: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -424,6 +425,7 @@ pub fn cgw_construct_infra_join_msg(
     infra_group_infra: MacAddress,
     infra_public_ip: SocketAddr,
     reporter_shard_id: i32,
+    connect_message_payload: String,
 ) -> Result<String> {
     let infra_join_msg = InfraJoinMessage {
         r#type: "infra_join",
@@ -431,6 +433,7 @@ pub fn cgw_construct_infra_join_msg(
         infra_group_infra,
         infra_public_ip,
         reporter_shard_id,
+        connect_message_payload,
     };
 
     Ok(serde_json::to_string(&infra_join_msg)?)

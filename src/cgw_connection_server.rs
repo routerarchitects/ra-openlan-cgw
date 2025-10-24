@@ -96,6 +96,7 @@ pub enum CGWConnectionServerReqMsg {
         MacAddress,
         SocketAddr,
         CGWDeviceCapabilities,
+        String,
         UnboundedSender<CGWConnectionProcessorReqMsg>,
     ),
     ConnectionClosed(MacAddress),
@@ -1723,6 +1724,7 @@ impl CGWConnectionServer {
                     device_mac,
                     ip_addr,
                     caps,
+                    connect_message_payload,
                     conn_processor_mbox_tx,
                 ) = msg
                 {
@@ -1954,6 +1956,7 @@ impl CGWConnectionServer {
                         device_mac,
                         ip_addr,
                         self.local_cgw_id,
+                        connect_message_payload,
                     ) {
                         self.enqueue_mbox_message_from_cgw_to_nb_api(device_group_id, resp);
                     } else {

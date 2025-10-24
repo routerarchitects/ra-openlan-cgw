@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 use crate::{
     cgw_connection_server::{CGWConnectionServer, CGWConnectionServerReqMsg},
     cgw_device::{CGWDeviceCapabilities, CGWDeviceType},
@@ -162,6 +167,10 @@ impl CGWConnectionProcessor {
         };
 
         debug!("Parse Connect Event");
+        let connect_message_payload = match &message {
+            Text(payload) => payload.clone(),
+            _ => String::new(),
+        };
         let evt = match cgw_ucentral_parse_connect_event(message) {
             Ok(e) => {
                 debug!("Some: {:?}", e);
@@ -235,7 +244,7 @@ impl CGWConnectionProcessor {
         // we can proceed.
         debug!("Sending ACK request for device serial: {}", self.serial);
         let (mbox_tx, mut mbox_rx) = unbounded_channel::<CGWConnectionProcessorReqMsg>();
-        let msg = CGWConnectionServerReqMsg::AddNewConnection(evt.serial, self.addr, caps, mbox_tx);
+        let msg = CGWConnectionServerReqMsg::AddNewConnection(evt.serial, self.addr, caps, connect_message_payload, mbox_tx);
         self.cgw_server
             .enqueue_mbox_message_to_cgw_server(msg)
             .await;
