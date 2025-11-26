@@ -900,9 +900,8 @@ pub fn cgw_ucentral_ap_parse_message(
         }
     } else if map.contains_key("result") {
         if let Value::Object(result) = &map["result"] {
-            let id_value = result
+            let id_value = map
                 .get("id")
-                .or_else(|| map.get("id"))
                 .ok_or_else(|| {
                     warn!("Received JRPC <result> without id!");
                     Error::UCentralParser("Received JRPC <result> without id")

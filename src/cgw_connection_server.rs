@@ -480,7 +480,7 @@ impl CGWConnectionServer {
                 devices.push((*mac, dev.get_device_group_id()));
             }
         }
-
+        // Unassigned devices are not disconnected because they are not owned by any CGW-shard
         for (mac, gid) in devices {
             if gid == 0 {
                 continue;
@@ -517,6 +517,9 @@ impl CGWConnectionServer {
                             );
                         }
                     }
+                    // make sure its pgDb row survives
+                    // and then evict our cached copy, so we stop routing
+                    // requests for it. The new owner will repopulate Redis/cache after rebalance.
                     {
                         let mut cache_lock = self.devices_cache.write().await;
                         if let Some(device) = cache_lock.get_device_mut(&mac) {
@@ -524,10 +527,12 @@ impl CGWConnectionServer {
                         }
                         cache_lock.del_device(&mac);
                     }
-                       if let Err(e) = self
-                        .cgw_remote_discovery
-                        .del_device_from_redis_cache(&mac)
-                        .await
+
+                    // Remove stale entry from redis Db1.
+                    if let Err(e) = self
+                    .cgw_remote_discovery
+                    .del_device_from_redis_cache(&mac)
+                    .await
                     {
                         error!("{e}");
                     }

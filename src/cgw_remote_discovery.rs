@@ -50,7 +50,7 @@ static REDIS_KEY_GID_VALUE_INFRAS_CAPACITY: &str = "infras_capacity";
 static REDIS_KEY_GID_VALUE_INFRAS_ASSIGNED: &str = "infras_assigned";
 
 const CGW_REDIS_DEVICES_CACHE_DB: u32 = 1;
-const REDIS_SHARD_TTL_SEC: u64 = 30;
+pub const REDIS_SHARD_TTL_SEC: u64 = 30;
 const REDIS_SHARD_HEARTBEAT_INTERVAL_SEC: u64 = 15;
 
 #[derive(Clone, Debug, Default, PartialEq)]

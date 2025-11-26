@@ -6,7 +6,7 @@
 use crate::cgw_app_args::CGWKafkaArgs;
 use crate::cgw_device::OldNew;
 use crate::cgw_ucentral_parser::CGWDeviceChange;
-
+use crate::cgw_remote_discovery::REDIS_SHARD_TTL_SEC;
 use crate::cgw_connection_server::{CGWConnectionNBAPIReqMsg, CGWConnectionNBAPIReqMsgOrigin};
 use crate::cgw_errors::{Error, Result};
 use crate::cgw_metrics::{CGWMetrics, CGWMetricsHealthComponent, CGWMetricsHealthComponentStatus};
@@ -34,7 +34,8 @@ use tokio::{
     sync::mpsc::UnboundedSender,
     time::{Duration, sleep},
 };
-use uuid::Uuid;
+use uuid::{Timestamp, Uuid};
+use uuid::NoContext;
 
 type CGWConnectionServerMboxTx = UnboundedSender<CGWConnectionNBAPIReqMsg>;
 type CGWCNCConsumerType = StreamConsumer<CustomContext>;
@@ -943,7 +944,6 @@ impl CGWNBApiClient {
         key: String,
         payload: String,
     ) {
-        sleep(Duration::from_secs(40)).await;
         let produce_future = self
             .prod
             .p
@@ -961,15 +961,14 @@ impl CGWNBApiClient {
         }
     }
 
-    /// \brief Trigger a rebalance notification by enqueuing a predefined rebalance message with unique uuid.
+    /// \brief Trigger a rebalance notification by enqueuing a predefined rebalance message with unique uuid,delay by TTL expiration time + 10sec.
     pub async fn publish_leader_rebalance_groups(&self) {
-        sleep(Duration::from_secs(40)).await;
-        let epoch = SystemTime::now()
+        sleep(Duration::from_secs(REDIS_SHARD_TTL_SEC + 10)).await;
+        let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let uuid_str = format!("6c59d058-1902-11ef-b0a0-2b{:010x}", epoch);
-        let uuid = Uuid::parse_str(&uuid_str).unwrap_or_else(|_| Uuid::nil());
+            .unwrap_or_default();
+        let ts = Timestamp::from_unix(&NoContext, now.as_secs(), now.subsec_nanos());
+        let uuid = Uuid::new_v1(ts, &[0, 0, 0, 0, 0, 1]);
         let key = uuid.to_string();
         let payload = serde_json::json!({
             "type": "rebalance_groups",
