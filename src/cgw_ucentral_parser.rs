@@ -300,7 +300,7 @@ impl FromStr for CGWUCentralCommandType {
             "request" => Ok(CGWUCentralCommandType::Request),
             "event" => Ok(CGWUCentralCommandType::Event),
             "telemetry" => Ok(CGWUCentralCommandType::Telemetry),
-            "remote_access" => Ok(CGWUCentralCommandType::RemoteAccess),
+            "rtty" => Ok(CGWUCentralCommandType::RemoteAccess),
             "ping" => Ok(CGWUCentralCommandType::Ping),
             "script" => Ok(CGWUCentralCommandType::Script),
             "certupdate" => Ok(CGWUCentralCommandType::CertUpdate),
