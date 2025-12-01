@@ -244,6 +244,7 @@ pub enum CGWUCentralEventType {
     VenueBroadcast,
     RealtimeEvent(CGWUCentralEventRealtimeEvent),
     Reply(CGWUCentralEventReply),
+    Telemetry(Value),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
