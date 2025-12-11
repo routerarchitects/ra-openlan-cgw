@@ -26,6 +26,7 @@ use futures_util::{
     FutureExt, SinkExt, StreamExt,
 };
 use uuid::Uuid;
+use serde_json::Value;
 
 use std::{net::SocketAddr, str::FromStr, sync::Arc};
 use tokio::{
@@ -366,18 +367,30 @@ impl CGWConnectionProcessor {
 
                             *fsm_state = CGWUCentralMessageProcessorState::Idle;
                             debug!("Got reply event for pending request id: {pending_req_id}");
-                            if let Ok(resp) = cgw_construct_infra_request_result_msg(
-                                self.cgw_server.get_local_id(),
-                                pending_req_uuid,
-                                pending_req_id,
-                                true,
-                                None,
-                                Some(payload.clone()),
-                            ) {
-                                self.cgw_server
-                                    .enqueue_mbox_message_from_cgw_to_nb_api(self.group_id, resp);
-                            } else {
-                                error!("Failed to construct rebalance_group message!");
+                            match serde_json::from_str::<Value>(&payload) {
+                                Ok(payload_value) => {
+                                    if let Ok(resp) = cgw_construct_infra_request_result_msg(
+                                        self.cgw_server.get_local_id(),
+                                        pending_req_uuid,
+                                        pending_req_id,
+                                        true,
+                                        None,
+                                        Some(payload_value),
+                                    ) {
+                                        self.cgw_server
+                                            .enqueue_mbox_message_from_cgw_to_nb_api(self.group_id, resp);
+                                    } else {
+                                        error!("Failed to construct infra_request_result message!");
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Dropping non-JSON reply from {}: {e}; payload: {}",
+                                        self.serial.to_hex_string(),
+                                        payload
+                                    );
+                                    return Ok(CGWConnectionState::IsActive);
+                                }
                             }
                         } else if let CGWUCentralEventType::RealtimeEvent(_) = evt.evt_type {
                             if self.feature_topomap_enabled {

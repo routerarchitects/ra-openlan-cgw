@@ -1872,39 +1872,39 @@ impl CGWConnectionServer {
                             // whether it belongs to another shard (foreign) or is unassigned.
                             //If it's foreign disconnect it.
                             if let Some(group_id) = self.cgw_remote_discovery.get_device_group_id(&device_mac).await {
-                            debug!("Device {} belongs to group {}", device_mac, group_id);
-                            if let Some(group_owner_id) = self.cgw_remote_discovery.get_infra_group_owner_id(group_id).await {
-                                if group_owner_id != self.local_cgw_id {
-                                    if let Ok(resp) = cgw_construct_foreign_infra_connection_msg(
-                                        group_id,
-                                        device_mac,
-                                        self.local_cgw_id,
-                                        group_owner_id,
-                                    ) {
-                                        self.enqueue_mbox_message_from_cgw_to_nb_api(group_id, resp);
-                                    } else {
-                                        error!("Failed to construct foreign_infra_connection message!");
-                                    }
+                                debug!("Device {} belongs to group {}", device_mac, group_id);
+                                if let Some(group_owner_id) = self.cgw_remote_discovery.get_infra_group_owner_id(group_id).await {
+                                    if group_owner_id != self.local_cgw_id {
+                                        if let Ok(resp) = cgw_construct_foreign_infra_connection_msg(
+                                            group_id,
+                                            device_mac,
+                                            self.local_cgw_id,
+                                            group_owner_id,
+                                        ) {
+                                            self.enqueue_mbox_message_from_cgw_to_nb_api(group_id, resp);
+                                        } else {
+                                            error!("Failed to construct foreign_infra_connection message!");
+                                        }
 
-                                    if let Err(e) = conn_processor_mbox_tx_clone
-                                        .send(CGWConnectionProcessorReqMsg::AddNewConnectionShouldClose)
-                                    {
-                                        warn!(
-                                            "Failed to send disconnection request for {}! Error: {e}",
-                                            device_mac.to_hex_string()
+                                        if let Err(e) = conn_processor_mbox_tx_clone
+                                            .send(CGWConnectionProcessorReqMsg::AddNewConnectionShouldClose)
+                                        {
+                                            warn!(
+                                                "Failed to send disconnection request for {}! Error: {e}",
+                                                device_mac.to_hex_string()
+                                            );
+                                        }
+
+                                        CGWMetrics::get_ref().change_counter(
+                                            CGWMetricsCounterType::ConnectionsNum,
+                                            CGWMetricsCounterOpType::Dec,
                                         );
+
+                                        continue;
                                     }
-
-                                    CGWMetrics::get_ref().change_counter(
-                                        CGWMetricsCounterType::ConnectionsNum,
-                                        CGWMetricsCounterOpType::Dec,
-                                    );
-
-                                    continue;
                                 }
+                                device_group_id=group_id;
                             }
-                            device_group_id=group_id;
-                        }
                         let remains_in_db = device_group_id != 0;
                         if device_group_id == 0 {
                             if let Ok(resp) = cgw_construct_unassigned_infra_connection_msg(

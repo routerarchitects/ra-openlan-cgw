@@ -24,6 +24,7 @@ use rdkafka::{
     producer::{FutureProducer, FutureRecord},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::Range;
@@ -104,7 +105,7 @@ pub struct InfraGroupInfraRequestResult {
     pub success: bool,
     pub error_message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub received_payload: Option<String>,
+    pub received_payload: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -463,7 +464,7 @@ pub fn cgw_construct_infra_request_result_msg(
     id: u64,
     success: bool,
     error_message: Option<String>,
-    received_payload: Option<String>,
+    received_payload: Option<Value>,
 ) -> Result<String> {
     let infra_request_result = InfraGroupInfraRequestResult {
         r#type: "infra_request_result",
