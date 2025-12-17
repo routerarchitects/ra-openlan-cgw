@@ -230,7 +230,7 @@ pub struct CGWUCentralEventRealtimeEvent {
 pub enum CGWUCentralEventType {
     Connect(CGWUCentralEventConnect),
     State(CGWUCentralEventState),
-    Healthcheck,
+    Healthcheck(Value),
     Log(CGWUCentralEventLog),
     Event,
     Alarm,

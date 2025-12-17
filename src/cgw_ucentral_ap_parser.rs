@@ -538,6 +538,24 @@ fn parse_telemetry_event_data(map: CGWUCentralJRPCMessage) -> Result<CGWUCentral
     })
 }
 
+fn parse_health_event_data(map: CGWUCentralJRPCMessage) -> Result<CGWUCentralEvent> {
+    let params = map.get("params").ok_or_else(|| {
+        Error::UCentralParser("Invalid health event received: params field is missing")
+    })?;
+
+    let serial = MacAddress::from_str(
+        params["serial"]
+            .as_str()
+            .ok_or_else(|| Error::UCentralParser("Failed to parse health serial from params"))?,
+    )?;
+
+    Ok(CGWUCentralEvent {
+        serial,
+        evt_type: CGWUCentralEventType::Healthcheck(params.clone()),
+        decompressed: None,
+    })
+}
+
 fn parse_realtime_event_data(
     map: CGWUCentralJRPCMessage,
     timestamp: i64,
@@ -909,6 +927,8 @@ pub fn cgw_ucentral_ap_parse_message(
             return parse_state_event_data(feature_topomap_enabled, map, timestamp);
         } else if method == "telemetry" {
             return parse_telemetry_event_data(map);
+        } else if method == "healthcheck" {
+            return parse_health_event_data(map);
         } else if method == "event" {
             if feature_topomap_enabled {
                 return parse_realtime_event_data(map, timestamp);
