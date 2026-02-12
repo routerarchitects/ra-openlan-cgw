@@ -42,8 +42,9 @@ use crate::{
 use crate::cgw_errors::{Error, Result};
 
 use std::str::FromStr;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr}, sync::Arc};
 use tokio::{
+    io::AsyncReadExt,
     net::TcpStream,
     runtime::Runtime,
     sync::{
@@ -82,6 +83,93 @@ impl CGWConnMap {
     }
 }
 
+const PROXY_V2_SIG: [u8; 12] = [
+    0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
+];
+
+fn proxy_v2_parse_src_addr(family: u8, payload: &[u8]) -> std::io::Result<SocketAddr> {
+    match family {
+        0x1 => {
+            if payload.len() < 12 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "PROXY v2 IPv4 payload too short",
+                ));
+            }
+            let src_ip = Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]);
+            let src_port = u16::from_be_bytes([payload[8], payload[9]]);
+            Ok(SocketAddr::new(IpAddr::V4(src_ip), src_port))
+        }
+        0x2 => {
+            if payload.len() < 36 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "PROXY v2 IPv6 payload too short",
+                ));
+            }
+            let src_ip = Ipv6Addr::new(
+                u16::from_be_bytes([payload[0], payload[1]]),
+                u16::from_be_bytes([payload[2], payload[3]]),
+                u16::from_be_bytes([payload[4], payload[5]]),
+                u16::from_be_bytes([payload[6], payload[7]]),
+                u16::from_be_bytes([payload[8], payload[9]]),
+                u16::from_be_bytes([payload[10], payload[11]]),
+                u16::from_be_bytes([payload[12], payload[13]]),
+                u16::from_be_bytes([payload[14], payload[15]]),
+            );
+            let src_port = u16::from_be_bytes([payload[32], payload[33]]);
+            Ok(SocketAddr::new(IpAddr::V6(src_ip), src_port))
+        }
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Unsupported PROXY v2 address family",
+        )),
+    }
+}
+
+async fn proxy_v2_read_src_addr(stream: &mut TcpStream) -> std::io::Result<SocketAddr> {
+    let mut header = [0u8; 16];
+    stream.read_exact(&mut header).await?;
+    if header[..12] != PROXY_V2_SIG {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Missing PROXY v2 signature",
+        ));
+    }
+
+    let ver_cmd = header[12];
+    let version = ver_cmd >> 4;
+    let command = ver_cmd & 0x0f;
+    if version != 0x2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Unsupported PROXY protocol version",
+        ));
+    }
+    if command != 0x1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Unsupported PROXY protocol command",
+        ));
+    }
+
+    let fam_proto = header[13];
+    let family = fam_proto >> 4;
+    let proto = fam_proto & 0x0f;
+    if proto != 0x1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Unsupported PROXY v2 transport protocol",
+        ));
+    }
+
+    let len = u16::from_be_bytes([header[14], header[15]]) as usize;
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).await?;
+
+    proxy_v2_parse_src_addr(family, &payload)
+}
+
 type CGWConnectionServerMboxRx = UnboundedReceiver<CGWConnectionServerReqMsg>;
 type CGWConnectionServerMboxTx = UnboundedSender<CGWConnectionServerReqMsg>;
 type CGWConnectionServerNBAPIMboxTx = UnboundedSender<CGWConnectionNBAPIReqMsg>;
@@ -117,6 +205,8 @@ pub enum CGWConnectionNBAPIReqMsg {
 pub struct CGWConnectionServer {
     // Allow client certificate mismatch
     allow_mismatch: bool,
+    // Expect PROXY protocol v2 on incoming TCP connections
+    proxy_proto_v2: bool,
 
     local_cgw_id: i32,
     // CGWConnectionServer write into this mailbox,
@@ -366,6 +456,7 @@ impl CGWConnectionServer {
 
         let server = Arc::new(CGWConnectionServer {
             allow_mismatch: app_args.wss_args.allow_mismatch,
+            proxy_proto_v2: app_args.wss_args.proxy_proto_v2,
             local_cgw_id: app_args.cgw_id,
             connmap: CGWConnMap::new(),
             wss_rx_tx_runtime: wss_runtime_handle,
@@ -2066,6 +2157,25 @@ impl CGWConnectionServer {
         let server_clone = self.clone();
 
         self.wss_rx_tx_runtime.spawn(async move {
+            let mut socket = socket;
+            let mut conn_addr = addr;
+
+            if server_clone.proxy_proto_v2 {
+                match proxy_v2_read_src_addr(&mut socket).await {
+                    Ok(proxy_addr) => {
+                        conn_addr = proxy_addr;
+                        debug!("PROXY v2 source address: {}", conn_addr);
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to read PROXY v2 header from {}: {}. Closing connection",
+                            addr, e
+                        );
+                        return;
+                    }
+                }
+            }
+
             // Accept the TLS connection.
             let (client_cn, tls_stream) = match tls_acceptor.accept(socket).await {
                 Ok(stream) => match cgw_tls_get_cn_from_stream(&stream).await {
@@ -2082,7 +2192,7 @@ impl CGWConnectionServer {
             };
 
             let allow_mismatch = server_clone.allow_mismatch;
-            let conn_processor = CGWConnectionProcessor::new(server_clone, addr);
+            let conn_processor = CGWConnectionProcessor::new(server_clone, conn_addr);
             if let Err(e) = conn_processor
                 .start(tls_stream, client_cn, allow_mismatch)
                 .await
