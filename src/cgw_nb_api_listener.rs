@@ -714,7 +714,20 @@ impl ConsumerContext for CustomContext {
 static GROUP_ID: &str = "CGW";
 const CONSUMER_TOPICS: [&str; 1] = ["CnC"];
 const PRODUCER_TOPICS: &str = "CnC_Res";
+const PRODUCER_DLQ_TOPIC: &str = "DLQ";
 const PRODUCER_CNCTOPIC: &str = "CnC";
+
+fn should_route_to_dlq(payload: &str) -> bool {
+    if !payload.contains("\"success\"") {
+        return false;
+    }
+
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(payload) else {
+        return false;
+    };
+
+    matches!(map.get("success"), Some(Value::Bool(false)))
+}
 
 struct CGWCNCProducer {
     p: CGWCNCProducerType,
@@ -925,8 +938,14 @@ impl CGWNBApiClient {
     }
 
     pub async fn enqueue_mbox_message_from_cgw_server(&self, key: String, payload: String) {
+        let topic = if should_route_to_dlq(&payload) {
+            PRODUCER_DLQ_TOPIC
+        } else {
+            PRODUCER_TOPICS
+        };
+
         let produce_future = self.prod.p.send(
-            FutureRecord::to(PRODUCER_TOPICS)
+            FutureRecord::to(topic)
                 .key(&key)
                 .payload(&payload),
             Duration::from_secs(0),
