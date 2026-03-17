@@ -130,6 +130,8 @@ impl CGWConnectionProcessor {
 
         };
 
+        debug!("WebSocket client, remote address: {}", self.addr);
+
         let (sink, mut stream) = ws_stream.split();
 
         // check if we have any pending msgs (we expect connect at this point, protocol-wise)

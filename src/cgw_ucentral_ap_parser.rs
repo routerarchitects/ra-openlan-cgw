@@ -849,8 +849,12 @@ fn parse_realtime_event_data(
             })
         }
         _ => {
-            warn!("Received unknown event: {evt_type}!");
-            Err(Error::UCentralParser("Received unknown event"))
+            debug!("Received unknown event type: {evt_type}");
+            Ok(CGWUCentralEvent {
+                serial,
+                evt_type: CGWUCentralEventType::Event,
+                decompressed: None,
+            })
         }
     }
 }
