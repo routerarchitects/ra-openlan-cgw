@@ -66,6 +66,8 @@ pub struct InfraGroupDeleteResponse {
 pub struct InfraGroupInfrasAddResponse {
     pub r#type: &'static str,
     pub infra_group_id: i32,
+    #[serde(rename = "infra_group_infra")]
+    pub serial_numbers: Vec<MacAddress>,
     pub failed_infras: Vec<MacAddress>,
     pub reporter_shard_id: i32,
     pub uuid: Uuid,
@@ -78,6 +80,8 @@ pub struct InfraGroupInfrasAddResponse {
 pub struct InfraGroupInfrasDelResponse {
     pub r#type: &'static str,
     pub infra_group_id: i32,
+    #[serde(rename = "infra_group_infra")]
+    pub serial_numbers: Vec<MacAddress>,
     pub failed_infras: Vec<MacAddress>,
     pub reporter_shard_id: i32,
     pub uuid: Uuid,
@@ -230,6 +234,7 @@ pub fn cgw_construct_infra_group_delete_response(
 
 pub fn cgw_construct_infra_group_infras_add_response(
     infra_group_id: i32,
+    serial_numbers: Vec<MacAddress>,
     failed_infras: Vec<MacAddress>,
     reporter_shard_id: i32,
     uuid: Uuid,
@@ -240,6 +245,7 @@ pub fn cgw_construct_infra_group_infras_add_response(
     let dev_add = InfraGroupInfrasAddResponse {
         r#type: "infrastructure_group_infras_add_response",
         infra_group_id,
+        serial_numbers,
         failed_infras,
         reporter_shard_id,
         uuid,
@@ -253,6 +259,7 @@ pub fn cgw_construct_infra_group_infras_add_response(
 
 pub fn cgw_construct_infra_group_infras_del_response(
     infra_group_id: i32,
+    serial_numbers: Vec<MacAddress>,
     failed_infras: Vec<MacAddress>,
     reporter_shard_id: i32,
     uuid: Uuid,
@@ -263,6 +270,7 @@ pub fn cgw_construct_infra_group_infras_del_response(
     let dev_del = InfraGroupInfrasDelResponse {
         r#type: "infrastructure_group_infras_del_response",
         infra_group_id,
+        serial_numbers,
         failed_infras,
         reporter_shard_id,
         uuid,

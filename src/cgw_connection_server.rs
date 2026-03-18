@@ -1338,6 +1338,7 @@ impl CGWConnectionServer {
                             {
                                 if let Ok(resp) = cgw_construct_infra_group_infras_add_response(
                                     gid,
+                                    Vec::new(),
                                     infras_list.clone(),
                                     self.local_cgw_id,
                                     uuid,
@@ -1368,6 +1369,7 @@ impl CGWConnectionServer {
 
                                     if let Ok(resp) = cgw_construct_infra_group_infras_add_response(
                                         gid,
+                                        success_ifras.clone(),
                                         // Empty vec: no infras assign <failed>
                                         Vec::new(),
                                         self.local_cgw_id,
@@ -1458,11 +1460,15 @@ impl CGWConnectionServer {
                                         // GID changes;
                                         if !macs_to_notify.is_empty() {
                                             self.clone()
-                                                .notify_devices_on_gid_change(macs_to_notify, gid);
+                                                .notify_devices_on_gid_change(
+                                                    macs_to_notify.clone(),
+                                                    gid,
+                                                );
                                         }
 
                                         if let Ok(resp) = cgw_construct_infra_group_infras_add_response(
                                             gid,
+                                            macs_to_notify.clone(),
                                             failed_infras,
                                             self.local_cgw_id,
                                             uuid,
@@ -1497,6 +1503,7 @@ impl CGWConnectionServer {
                             {
                                 if let Ok(resp) = cgw_construct_infra_group_infras_del_response(
                                     gid,
+                                    Vec::new(),
                                     infras_list.clone(),
                                     self.local_cgw_id,
                                     uuid,
@@ -1531,6 +1538,7 @@ impl CGWConnectionServer {
 
                                     if let Ok(resp) = cgw_construct_infra_group_infras_del_response(
                                         gid,
+                                        infras_list.clone(),
                                         // Empty vec: no infras de-assign <failed>
                                         Vec::new(),
                                         self.local_cgw_id,
@@ -1562,11 +1570,15 @@ impl CGWConnectionServer {
                                         // GID changes;
                                         if !macs_to_notify.is_empty() {
                                             self.clone()
-                                                .notify_devices_on_gid_change(macs_to_notify, 0i32);
+                                                .notify_devices_on_gid_change(
+                                                    macs_to_notify.clone(),
+                                                    0i32,
+                                                );
                                         }
 
                                         if let Ok(resp) = cgw_construct_infra_group_infras_del_response(
                                             gid,
+                                            macs_to_notify.clone(),
                                             failed_infras,
                                             self.local_cgw_id,
                                             uuid,
