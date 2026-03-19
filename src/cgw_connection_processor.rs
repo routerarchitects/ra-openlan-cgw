@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 use crate::{
     cgw_connection_server::{CGWConnectionServer, CGWConnectionServerReqMsg},
     cgw_device::{CGWDeviceCapabilities, CGWDeviceType},
@@ -21,6 +26,7 @@ use futures_util::{
     FutureExt, SinkExt, StreamExt,
 };
 use uuid::Uuid;
+use serde_json::Value;
 
 use std::{net::SocketAddr, str::FromStr, sync::Arc};
 use tokio::{
@@ -124,6 +130,8 @@ impl CGWConnectionProcessor {
 
         };
 
+        debug!("WebSocket client, remote address: {}", self.addr);
+
         let (sink, mut stream) = ws_stream.split();
 
         // check if we have any pending msgs (we expect connect at this point, protocol-wise)
@@ -162,6 +170,10 @@ impl CGWConnectionProcessor {
         };
 
         debug!("Parse Connect Event");
+        let connect_message_payload = match &message {
+            Text(payload) => payload.clone(),
+            _ => String::new(),
+        };
         let evt = match cgw_ucentral_parse_connect_event(message) {
             Ok(e) => {
                 debug!("Some: {:?}", e);
@@ -235,7 +247,7 @@ impl CGWConnectionProcessor {
         // we can proceed.
         debug!("Sending ACK request for device serial: {}", self.serial);
         let (mbox_tx, mut mbox_rx) = unbounded_channel::<CGWConnectionProcessorReqMsg>();
-        let msg = CGWConnectionServerReqMsg::AddNewConnection(evt.serial, self.addr, caps, mbox_tx);
+        let msg = CGWConnectionServerReqMsg::AddNewConnection(evt.serial, self.addr, caps, connect_message_payload, mbox_tx);
         self.cgw_server
             .enqueue_mbox_message_to_cgw_server(msg)
             .await;
@@ -357,17 +369,30 @@ impl CGWConnectionProcessor {
 
                             *fsm_state = CGWUCentralMessageProcessorState::Idle;
                             debug!("Got reply event for pending request id: {pending_req_id}");
-                            if let Ok(resp) = cgw_construct_infra_request_result_msg(
-                                self.cgw_server.get_local_id(),
-                                pending_req_uuid,
-                                pending_req_id,
-                                true,
-                                None,
-                            ) {
-                                self.cgw_server
-                                    .enqueue_mbox_message_from_cgw_to_nb_api(self.group_id, resp);
-                            } else {
-                                error!("Failed to construct rebalance_group message!");
+                            match serde_json::from_str::<Value>(&payload) {
+                                Ok(payload_value) => {
+                                    if let Ok(resp) = cgw_construct_infra_request_result_msg(
+                                        self.cgw_server.get_local_id(),
+                                        pending_req_uuid,
+                                        pending_req_id,
+                                        true,
+                                        None,
+                                        Some(payload_value),
+                                    ) {
+                                        self.cgw_server
+                                            .enqueue_mbox_message_from_cgw_to_nb_api(self.group_id, resp);
+                                    } else {
+                                        error!("Failed to construct infra_request_result message!");
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Dropping non-JSON reply from {}: {e}; payload: {}",
+                                        self.serial.to_hex_string(),
+                                        payload
+                                    );
+                                    return Ok(CGWConnectionState::IsActive);
+                                }
                             }
                         } else if let CGWUCentralEventType::RealtimeEvent(_) = evt.evt_type {
                             if self.feature_topomap_enabled {
@@ -618,6 +643,7 @@ impl CGWConnectionProcessor {
                             Some(format!(
                                 "Reques flushed from infra queue {device_mac} due to previous request timeout!"
                             )),
+                            None,
                         ) {
                             // Currently Device Queue Manager does not store infars GID
                             self.cgw_server
@@ -642,6 +668,7 @@ impl CGWConnectionProcessor {
                         pending_req_id,
                         false,
                         Some(format!("Request timed out")),
+                        None,
                     ) {
                         self.cgw_server
                             .enqueue_mbox_message_from_cgw_to_nb_api(self.group_id, resp);

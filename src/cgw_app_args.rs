@@ -23,6 +23,7 @@ const CGW_DEFAULT_WSS_PORT: u16 = 15002;
 const CGW_DEFAULT_WSS_CAS: &str = "cas.pem";
 const CGW_DEFAULT_WSS_CERT: &str = "cert.pem";
 const CGW_DEFAULT_WSS_KEY: &str = "key.pem";
+const CGW_DEFAULT_PROXY_PROTO_V2: &str = "no";
 const CGW_DEFAULT_GRPC_LISTENING_IP: Ipv4Addr = Ipv4Addr::new(0, 0, 0, 0);
 const CGW_DEFAULT_GRPC_LISTENING_PORT: u16 = 50051;
 const CGW_DEFAULT_GRPC_PUBLIC_HOST: &str = "localhost";
@@ -62,6 +63,8 @@ pub struct CGWWSSArgs {
     pub wss_key: String,
     /// Allow Missmatch
     pub allow_mismatch: bool,
+    /// Expect PROXY protocol v2 on incoming TCP connections
+    pub proxy_proto_v2: bool,
 }
 
 impl CGWWSSArgs {
@@ -110,6 +113,13 @@ impl CGWWSSArgs {
             .unwrap_or(CGW_DEFAULT_ALLOW_CERT_MISMATCH.to_string());
         let allow_mismatch = mismatch == "yes";
 
+        let proxy_proto_v2_var: String =
+            env::var("CGW_PROXY_PROTO_V2").unwrap_or(CGW_DEFAULT_PROXY_PROTO_V2.to_string());
+        let proxy_proto_v2 = matches!(
+            proxy_proto_v2_var.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        );
+
         Ok(CGWWSSArgs {
             wss_t_num,
             wss_ip,
@@ -118,6 +128,7 @@ impl CGWWSSArgs {
             wss_cert,
             wss_key,
             allow_mismatch,
+            proxy_proto_v2,
         })
     }
 }

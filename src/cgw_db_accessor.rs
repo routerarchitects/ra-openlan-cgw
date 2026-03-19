@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 use crate::cgw_app_args::CGWDBArgs;
 
 use crate::cgw_tls::cgw_tls_create_db_connect;
@@ -309,6 +314,36 @@ impl CGWDBAccessor {
         }
     }
 
+    /// \brief Retrieve the infrastructure group for the given MAC address.
+    /// \param mac Infrastructure MAC address to look up.
+    /// \return Group from DB or `None` when no match is found.
+    pub async fn get_infra_group_id_by_mac(&self, mac: MacAddress) -> Option<i32> {
+        let query = match self
+            .cl
+            .prepare("SELECT infra_group_id FROM infras WHERE mac = $1")
+            .await
+        {
+            Ok(q) => q,
+            Err(e) => {
+                error!("Failed to prepare query for get_infra_group_id_by_mac! Error: {e}");
+                return None;
+            }
+        };
+
+        let result = self.cl.query_opt(&query, &[&mac]).await;
+
+        match result {
+            Ok(Some(row)) => Some(row.get::<_, i32>("infra_group_id")),
+            Ok(None) => {
+                debug!("No infra found in DB for mac: {}", mac.to_hex_string());
+                None
+            }
+            Err(e) => {
+                error!("Query failed for get_infra_group_id_by_mac! Error: {e}");
+                None
+            }
+        }
+    }
     pub async fn get_all_infras(&self) -> Option<Vec<CGWDBInfra>> {
         let mut list: Vec<CGWDBInfra> = Vec::new();
 
@@ -327,5 +362,32 @@ impl CGWDBAccessor {
                 None
             }
         }
+    }
+    /// \brief Count infras belonging to the provided group id in PostgreSQL.
+    /// \param gid infrastructure_group identifier to count members for.
+    /// \return Number of infras assigned to the group.
+    pub async fn get_infras_count_by_group(&self, gid: i32) -> Result<i32> {
+        let q = match self
+            .cl
+            .prepare("SELECT COUNT(*) FROM infras WHERE infra_group_id = $1")
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to prepare query to get infras count for gid {gid}! Error: {e}");
+                return Err(Error::DbAccessor("Failed to get infras count"));
+            }
+        };
+
+        let row = match self.cl.query_one(&q, &[&gid]).await {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Failed to get infras count for gid {gid}! Error: {e}");
+                return Err(Error::DbAccessor("Failed to get infras count"));
+            }
+        };
+
+        let count: i64 = row.get(0);
+        Ok(count as i32)
     }
 }

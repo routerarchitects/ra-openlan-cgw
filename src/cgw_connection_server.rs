@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 use crate::cgw_device::{
     cgw_detect_device_chages, CGWDevice, CGWDeviceCapabilities, CGWDeviceState, CGWDeviceType,
 };
@@ -37,8 +42,9 @@ use crate::{
 use crate::cgw_errors::{Error, Result};
 
 use std::str::FromStr;
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr}, sync::Arc};
 use tokio::{
+    io::AsyncReadExt,
     net::TcpStream,
     runtime::Runtime,
     sync::{
@@ -77,6 +83,93 @@ impl CGWConnMap {
     }
 }
 
+const PROXY_V2_SIG: [u8; 12] = [
+    0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
+];
+
+fn proxy_v2_parse_src_addr(family: u8, payload: &[u8]) -> std::io::Result<SocketAddr> {
+    match family {
+        0x1 => {
+            if payload.len() < 12 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "PROXY v2 IPv4 payload too short",
+                ));
+            }
+            let src_ip = Ipv4Addr::new(payload[0], payload[1], payload[2], payload[3]);
+            let src_port = u16::from_be_bytes([payload[8], payload[9]]);
+            Ok(SocketAddr::new(IpAddr::V4(src_ip), src_port))
+        }
+        0x2 => {
+            if payload.len() < 36 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "PROXY v2 IPv6 payload too short",
+                ));
+            }
+            let src_ip = Ipv6Addr::new(
+                u16::from_be_bytes([payload[0], payload[1]]),
+                u16::from_be_bytes([payload[2], payload[3]]),
+                u16::from_be_bytes([payload[4], payload[5]]),
+                u16::from_be_bytes([payload[6], payload[7]]),
+                u16::from_be_bytes([payload[8], payload[9]]),
+                u16::from_be_bytes([payload[10], payload[11]]),
+                u16::from_be_bytes([payload[12], payload[13]]),
+                u16::from_be_bytes([payload[14], payload[15]]),
+            );
+            let src_port = u16::from_be_bytes([payload[32], payload[33]]);
+            Ok(SocketAddr::new(IpAddr::V6(src_ip), src_port))
+        }
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Unsupported PROXY v2 address family",
+        )),
+    }
+}
+
+async fn proxy_v2_read_src_addr(stream: &mut TcpStream) -> std::io::Result<SocketAddr> {
+    let mut header = [0u8; 16];
+    stream.read_exact(&mut header).await?;
+    if header[..12] != PROXY_V2_SIG {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Missing PROXY v2 signature",
+        ));
+    }
+
+    let ver_cmd = header[12];
+    let version = ver_cmd >> 4;
+    let command = ver_cmd & 0x0f;
+    if version != 0x2 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Unsupported PROXY protocol version",
+        ));
+    }
+    if command != 0x1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Unsupported PROXY protocol command",
+        ));
+    }
+
+    let fam_proto = header[13];
+    let family = fam_proto >> 4;
+    let proto = fam_proto & 0x0f;
+    if proto != 0x1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Unsupported PROXY v2 transport protocol",
+        ));
+    }
+
+    let len = u16::from_be_bytes([header[14], header[15]]) as usize;
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).await?;
+
+    proxy_v2_parse_src_addr(family, &payload)
+}
+
 type CGWConnectionServerMboxRx = UnboundedReceiver<CGWConnectionServerReqMsg>;
 type CGWConnectionServerMboxTx = UnboundedSender<CGWConnectionServerReqMsg>;
 type CGWConnectionServerNBAPIMboxTx = UnboundedSender<CGWConnectionNBAPIReqMsg>;
@@ -91,6 +184,7 @@ pub enum CGWConnectionServerReqMsg {
         MacAddress,
         SocketAddr,
         CGWDeviceCapabilities,
+        String,
         UnboundedSender<CGWConnectionProcessorReqMsg>,
     ),
     ConnectionClosed(MacAddress),
@@ -111,6 +205,8 @@ pub enum CGWConnectionNBAPIReqMsg {
 pub struct CGWConnectionServer {
     // Allow client certificate mismatch
     allow_mismatch: bool,
+    // Expect PROXY protocol v2 on incoming TCP connections
+    proxy_proto_v2: bool,
 
     local_cgw_id: i32,
     // CGWConnectionServer write into this mailbox,
@@ -360,6 +456,7 @@ impl CGWConnectionServer {
 
         let server = Arc::new(CGWConnectionServer {
             allow_mismatch: app_args.wss_args.allow_mismatch,
+            proxy_proto_v2: app_args.wss_args.proxy_proto_v2,
             local_cgw_id: app_args.cgw_id,
             connmap: CGWConnMap::new(),
             wss_rx_tx_runtime: wss_runtime_handle,
@@ -460,6 +557,79 @@ impl CGWConnectionServer {
                 .enqueue_mbox_message_from_cgw_server(gid.to_string(), req)
                 .await;
         });
+    }
+
+    /// \brief Drop connections to devices owned by other CGW shards and notify NB API.
+    /// \details Walks the local cache to find devices whose infra group is managed by a different CGW,
+    /// constructs a `foreign_infra_connection` and publish on CnC_Res, schedules the device connection to close,
+    /// Remove stale entries from redis
+    async fn disconnect_foreign_devices(&self) {
+        let mut devices: Vec<(MacAddress, i32)> = Vec::new();
+        {
+            let cache_lock = self.devices_cache.read().await;
+            for (mac, dev) in cache_lock.iter() {
+                devices.push((*mac, dev.get_device_group_id()));
+            }
+        }
+        // Unassigned devices are not disconnected because they are not owned by any CGW-shard
+        for (mac, gid) in devices {
+            if gid == 0 {
+                continue;
+            }
+
+            if let Some(owner_id) = self
+                .cgw_remote_discovery
+                .get_infra_group_owner_id(gid)
+                .await
+            {
+                if owner_id != self.local_cgw_id {
+                    if let Ok(resp) = cgw_construct_foreign_infra_connection_msg(
+                        gid,
+                        mac,
+                        self.local_cgw_id,
+                        owner_id,
+                    ) {
+                        self.enqueue_mbox_message_from_cgw_to_nb_api(gid, resp);
+                    } else {
+                        error!("Failed to construct foreign_infra_connection message!");
+                    }
+
+                    let tx_opt = {
+                        let connmap_lock = self.connmap.map.read().await;
+                        connmap_lock.get(&mac).cloned()
+                    };
+
+                    if let Some(tx) = tx_opt {
+                        let msg = CGWConnectionProcessorReqMsg::AddNewConnectionShouldClose;
+                        if let Err(e) = tx.send(msg) {
+                            warn!(
+                                "Failed to send disconnection request for {}! Error: {e}",
+                                mac.to_hex_string()
+                            );
+                        }
+                    }
+                    // make sure its pgDb row survives
+                    // and then evict our cached copy, so we stop routing
+                    // requests for it. The new owner will repopulate Redis/cache after rebalance.
+                    {
+                        let mut cache_lock = self.devices_cache.write().await;
+                        if let Some(device) = cache_lock.get_device_mut(&mac) {
+                            device.set_device_remains_in_db(true);
+                        }
+                        cache_lock.del_device(&mac);
+                    }
+
+                    // Remove stale entry from redis Db1.
+                    if let Err(e) = self
+                    .cgw_remote_discovery
+                    .del_device_from_redis_cache(&mac)
+                    .await
+                    {
+                        error!("{e}");
+                    }
+                }
+            }
+        }
     }
 
     pub async fn enqueue_mbox_relayed_message_to_cgw_server(&self, key: String, req: String) {
@@ -716,6 +886,7 @@ impl CGWConnectionServer {
                             error!("Failed to sync Device cache! Error: {e}");
                         }
 
+                        self.disconnect_foreign_devices().await;
                         last_update_timestamp = current_timestamp;
                     }
                 }
@@ -1167,6 +1338,7 @@ impl CGWConnectionServer {
                             {
                                 if let Ok(resp) = cgw_construct_infra_group_infras_add_response(
                                     gid,
+                                    Vec::new(),
                                     infras_list.clone(),
                                     self.local_cgw_id,
                                     uuid,
@@ -1197,6 +1369,7 @@ impl CGWConnectionServer {
 
                                     if let Ok(resp) = cgw_construct_infra_group_infras_add_response(
                                         gid,
+                                        success_ifras.clone(),
                                         // Empty vec: no infras assign <failed>
                                         Vec::new(),
                                         self.local_cgw_id,
@@ -1287,11 +1460,15 @@ impl CGWConnectionServer {
                                         // GID changes;
                                         if !macs_to_notify.is_empty() {
                                             self.clone()
-                                                .notify_devices_on_gid_change(macs_to_notify, gid);
+                                                .notify_devices_on_gid_change(
+                                                    macs_to_notify.clone(),
+                                                    gid,
+                                                );
                                         }
 
                                         if let Ok(resp) = cgw_construct_infra_group_infras_add_response(
                                             gid,
+                                            macs_to_notify.clone(),
                                             failed_infras,
                                             self.local_cgw_id,
                                             uuid,
@@ -1326,6 +1503,7 @@ impl CGWConnectionServer {
                             {
                                 if let Ok(resp) = cgw_construct_infra_group_infras_del_response(
                                     gid,
+                                    Vec::new(),
                                     infras_list.clone(),
                                     self.local_cgw_id,
                                     uuid,
@@ -1360,6 +1538,7 @@ impl CGWConnectionServer {
 
                                     if let Ok(resp) = cgw_construct_infra_group_infras_del_response(
                                         gid,
+                                        infras_list.clone(),
                                         // Empty vec: no infras de-assign <failed>
                                         Vec::new(),
                                         self.local_cgw_id,
@@ -1391,11 +1570,15 @@ impl CGWConnectionServer {
                                         // GID changes;
                                         if !macs_to_notify.is_empty() {
                                             self.clone()
-                                                .notify_devices_on_gid_change(macs_to_notify, 0i32);
+                                                .notify_devices_on_gid_change(
+                                                    macs_to_notify.clone(),
+                                                    0i32,
+                                                );
                                         }
 
                                         if let Ok(resp) = cgw_construct_infra_group_infras_del_response(
                                             gid,
+                                            macs_to_notify.clone(),
                                             failed_infras,
                                             self.local_cgw_id,
                                             uuid,
@@ -1649,6 +1832,7 @@ impl CGWConnectionServer {
                     device_mac,
                     ip_addr,
                     caps,
+                    connect_message_payload,
                     conn_processor_mbox_tx,
                 ) = msg
                 {
@@ -1785,15 +1969,72 @@ impl CGWConnectionServer {
                             }
                         }
                     } else {
+                            // On first device connection, details won’t exist in the cache.
+                            // Each shard’s local cache only contains its own devices details,
+                            // so we fetch the device details from the DB to determine
+                            // whether it belongs to another shard (foreign) or is unassigned.
+                            //If it's foreign disconnect it.
+                            if let Some(group_id) = self.cgw_remote_discovery.get_device_group_id(&device_mac).await {
+                                debug!("Device {} belongs to group {}", device_mac, group_id);
+                                if let Some(group_owner_id) = self.cgw_remote_discovery.get_infra_group_owner_id(group_id).await {
+                                    if group_owner_id != self.local_cgw_id {
+                                        if let Ok(resp) = cgw_construct_foreign_infra_connection_msg(
+                                            group_id,
+                                            device_mac,
+                                            self.local_cgw_id,
+                                            group_owner_id,
+                                        ) {
+                                            self.enqueue_mbox_message_from_cgw_to_nb_api(group_id, resp);
+                                        } else {
+                                            error!("Failed to construct foreign_infra_connection message!");
+                                        }
+
+                                        if let Err(e) = conn_processor_mbox_tx_clone
+                                            .send(CGWConnectionProcessorReqMsg::AddNewConnectionShouldClose)
+                                        {
+                                            warn!(
+                                                "Failed to send disconnection request for {}! Error: {e}",
+                                                device_mac.to_hex_string()
+                                            );
+                                        }
+
+                                        CGWMetrics::get_ref().change_counter(
+                                            CGWMetricsCounterType::ConnectionsNum,
+                                            CGWMetricsCounterOpType::Dec,
+                                        );
+
+                                        continue;
+                                    }
+                                }
+                                device_group_id=group_id;
+                            }
+                        let remains_in_db = device_group_id != 0;
+                        if device_group_id == 0 {
+                            if let Ok(resp) = cgw_construct_unassigned_infra_connection_msg(
+                                device_mac,
+                                self.local_cgw_id,
+                            ) {
+                                self.enqueue_mbox_message_from_cgw_to_nb_api(0, resp);
+                            } else {
+                                error!("Failed to construct unassigned_infra_connection message!");
+                            }
+                        }
                         let device: CGWDevice = CGWDevice::new(
                             device_type,
                             CGWDeviceState::CGWDeviceConnected,
-                            0,
-                            false,
+                            device_group_id,
+                            remains_in_db,
                             caps,
                         );
                         devices_cache.add_device(&device_mac, &device);
 
+                        if let Err(e) = self
+                            .cgw_remote_discovery
+                            .del_device_from_all_shards_redis_cache(&device_mac)
+                            .await
+                        {
+                            error!("{e}");
+                        }
                         match serde_json::to_string(&device) {
                             Ok(device_json) => {
                                 if let Err(e) = self
@@ -1809,19 +2050,6 @@ impl CGWConnectionServer {
                             }
                         }
 
-                        if let Ok(resp) = cgw_construct_unassigned_infra_connection_msg(
-                            device_mac,
-                            self.local_cgw_id,
-                        ) {
-                            self.enqueue_mbox_message_from_cgw_to_nb_api(0, resp);
-                        } else {
-                            error!("Failed to construct unassigned_infra_connection message!");
-                        }
-
-                        debug!(
-                            "Detected unassigned infra {} connection",
-                            device_mac.to_hex_string()
-                        );
                     }
 
                     if self.feature_topomap_enabled {
@@ -1836,6 +2064,7 @@ impl CGWConnectionServer {
                         device_mac,
                         ip_addr,
                         self.local_cgw_id,
+                        connect_message_payload,
                     ) {
                         self.enqueue_mbox_message_from_cgw_to_nb_api(device_group_id, resp);
                     } else {
@@ -1940,6 +2169,25 @@ impl CGWConnectionServer {
         let server_clone = self.clone();
 
         self.wss_rx_tx_runtime.spawn(async move {
+            let mut socket = socket;
+            let mut conn_addr = addr;
+
+            if server_clone.proxy_proto_v2 {
+                match proxy_v2_read_src_addr(&mut socket).await {
+                    Ok(proxy_addr) => {
+                        conn_addr = proxy_addr;
+                        debug!("PROXY v2 source address: {}", conn_addr);
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to read PROXY v2 header from {}: {}. Closing connection",
+                            addr, e
+                        );
+                        return;
+                    }
+                }
+            }
+
             // Accept the TLS connection.
             let (client_cn, tls_stream) = match tls_acceptor.accept(socket).await {
                 Ok(stream) => match cgw_tls_get_cn_from_stream(&stream).await {
@@ -1956,7 +2204,7 @@ impl CGWConnectionServer {
             };
 
             let allow_mismatch = server_clone.allow_mismatch;
-            let conn_processor = CGWConnectionProcessor::new(server_clone, addr);
+            let conn_processor = CGWConnectionProcessor::new(server_clone, conn_addr);
             if let Err(e) = conn_processor
                 .start(tls_stream, client_cn, allow_mismatch)
                 .await
@@ -2056,6 +2304,7 @@ impl CGWConnectionServer {
                         req.1.command.id,
                         false,
                         Some(format!("Request failed due to infra {} disconnect", infra)),
+                        None,
                     ) {
                         self.enqueue_mbox_message_from_cgw_to_nb_api(req.0, resp);
                     } else {

@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -230,7 +235,7 @@ pub struct CGWUCentralEventRealtimeEvent {
 pub enum CGWUCentralEventType {
     Connect(CGWUCentralEventConnect),
     State(CGWUCentralEventState),
-    Healthcheck,
+    Healthcheck(Value),
     Log(CGWUCentralEventLog),
     Event,
     Alarm,
@@ -244,6 +249,7 @@ pub enum CGWUCentralEventType {
     VenueBroadcast,
     RealtimeEvent(CGWUCentralEventRealtimeEvent),
     Reply(CGWUCentralEventReply),
+    Telemetry(Value),
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -300,7 +306,7 @@ impl FromStr for CGWUCentralCommandType {
             "request" => Ok(CGWUCentralCommandType::Request),
             "event" => Ok(CGWUCentralCommandType::Event),
             "telemetry" => Ok(CGWUCentralCommandType::Telemetry),
-            "remote_access" => Ok(CGWUCentralCommandType::RemoteAccess),
+            "rtty" => Ok(CGWUCentralCommandType::RemoteAccess),
             "ping" => Ok(CGWUCentralCommandType::Ping),
             "script" => Ok(CGWUCentralCommandType::Script),
             "certupdate" => Ok(CGWUCentralCommandType::CertUpdate),

@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 use crate::cgw_device::CGWDevice;
 use eui48::MacAddress;
 use serde::{Deserialize, Serialize};
@@ -16,9 +21,19 @@ pub struct CGWDevicesCacheIterMutable<'a> {
     iter: hash_map::IterMut<'a, MacAddress, CGWDevice>,
 }
 
+pub struct CGWDevicesCacheIter<'a> {
+    iter: hash_map::Iter<'a, MacAddress, CGWDevice>,
+}
 impl<'a> Iterator for CGWDevicesCacheIterMutable<'a> {
     type Item = (&'a MacAddress, &'a mut CGWDevice);
 
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+impl<'a> Iterator for CGWDevicesCacheIter<'a> {
+    type Item = (&'a MacAddress, &'a CGWDevice);
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
     }
@@ -88,6 +103,11 @@ impl CGWDevicesCache {
         }
     }
 
+    pub fn iter(&self) -> CGWDevicesCacheIter<'_> {
+        CGWDevicesCacheIter {
+            iter: self.cache.iter(),
+        }
+    }
     pub fn flush_all(&mut self) {
         self.cache.clear();
     }

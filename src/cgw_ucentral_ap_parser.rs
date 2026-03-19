@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0 OR LicenseRef-Commercial
+ * Copyright (c) 2025 Infernet Systems Pvt Ltd
+ * Portions copyright (c) Telecom Infra Project (TIP), BSD-3-Clause
+ */
 use base64::prelude::*;
 use eui48::MacAddress;
 use flate2::read::ZlibDecoder;
@@ -515,6 +520,42 @@ fn parse_state_event_data(
     Err(Error::UCentralParser("Failed to parse state event"))
 }
 
+fn parse_telemetry_event_data(map: CGWUCentralJRPCMessage) -> Result<CGWUCentralEvent> {
+    let params = map.get("params").ok_or_else(|| {
+        Error::UCentralParser("Invalid telemetry event received: params field is missing")
+    })?;
+
+    let serial = MacAddress::from_str(
+        params["serial"]
+            .as_str()
+            .ok_or_else(|| Error::UCentralParser("Failed to parse telemetry serial from params"))?,
+    )?;
+
+    Ok(CGWUCentralEvent {
+        serial,
+        evt_type: CGWUCentralEventType::Telemetry(params.clone()),
+        decompressed: None,
+    })
+}
+
+fn parse_health_event_data(map: CGWUCentralJRPCMessage) -> Result<CGWUCentralEvent> {
+    let params = map.get("params").ok_or_else(|| {
+        Error::UCentralParser("Invalid health event received: params field is missing")
+    })?;
+
+    let serial = MacAddress::from_str(
+        params["serial"]
+            .as_str()
+            .ok_or_else(|| Error::UCentralParser("Failed to parse health serial from params"))?,
+    )?;
+
+    Ok(CGWUCentralEvent {
+        serial,
+        evt_type: CGWUCentralEventType::Healthcheck(params.clone()),
+        decompressed: None,
+    })
+}
+
 fn parse_realtime_event_data(
     map: CGWUCentralJRPCMessage,
     timestamp: i64,
@@ -808,8 +849,12 @@ fn parse_realtime_event_data(
             })
         }
         _ => {
-            warn!("Received unknown event: {evt_type}!");
-            Err(Error::UCentralParser("Received unknown event"))
+            debug!("Received unknown event type: {evt_type}");
+            Ok(CGWUCentralEvent {
+                serial,
+                evt_type: CGWUCentralEventType::Event,
+                decompressed: None,
+            })
         }
     }
 }
@@ -884,6 +929,10 @@ pub fn cgw_ucentral_ap_parse_message(
             return Ok(connect_event);
         } else if method == "state" {
             return parse_state_event_data(feature_topomap_enabled, map, timestamp);
+        } else if method == "telemetry" {
+            return parse_telemetry_event_data(map);
+        } else if method == "healthcheck" {
+            return parse_health_event_data(map);
         } else if method == "event" {
             if feature_topomap_enabled {
                 return parse_realtime_event_data(map, timestamp);
@@ -895,12 +944,14 @@ pub fn cgw_ucentral_ap_parse_message(
         }
     } else if map.contains_key("result") {
         if let Value::Object(result) = &map["result"] {
-            if !result.contains_key("id") {
-                warn!("Received JRPC <result> without id!");
-                return Err(Error::UCentralParser("Received JRPC <result> without id"));
-            }
+            let id_value = map
+                .get("id")
+                .ok_or_else(|| {
+                    warn!("Received JRPC <result> without id!");
+                    Error::UCentralParser("Received JRPC <result> without id")
+                })?;
 
-            let id = result["id"]
+            let id = id_value
                 .as_u64()
                 .ok_or_else(|| Error::UCentralParser("Failed to parse id"))?;
             let reply_event = CGWUCentralEvent {
