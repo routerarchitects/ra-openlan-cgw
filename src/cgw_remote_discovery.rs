@@ -211,6 +211,12 @@ async fn cgw_create_redis_client(redis_args: &CGWRedisArgs) -> Result<Client> {
 }
 
 impl CGWRemoteDiscovery {
+    fn parse_shard_id_from_device_cache_key(key: &str) -> Option<i32> {
+        let (shard_key, _) = key.split_once('|')?;
+        let shard_id = shard_key.strip_prefix(REDIS_KEY_SHARD_ID_PREFIX)?;
+        shard_id.parse().ok()
+    }
+
     pub async fn new(app_args: &AppArgs) -> Result<Self> {
         debug!(
             "Trying to create redis db connection ({}:{})",
@@ -1066,6 +1072,21 @@ impl CGWRemoteDiscovery {
                                 }
                             }
                         } else {
+                            match self
+                                .update_existing_device_entry_in_redis_cache(&device_mac, gid, true)
+                                .await
+                            {
+                                Ok(true) => {
+                                    assigned_infras_num += 1;
+                                    success_infras.push(device_mac);
+                                    continue;
+                                }
+                                Ok(false) => {}
+                                Err(e) => {
+                                    error!("{e}");
+                                }
+                            }
+
                             let device = CGWDevice::new(
                                 CGWDeviceType::default(),
                                 CGWDeviceState::CGWDeviceDisconnected,
@@ -1202,6 +1223,8 @@ impl CGWRemoteDiscovery {
         shard_id: i32,
         stream: Vec<(String, String)>,
     ) -> Result<()> {
+        let stream_len = stream.len();
+
         // try to use internal cache first
         if let Some(cl) = self.remote_cgws_map.read().await.get(&shard_id) {
             if let Err(e) = cl.client.relay_request_stream(stream).await {
@@ -1564,6 +1587,158 @@ impl CGWRemoteDiscovery {
             }
 
         self.db_accessor.get_infra_group_id_by_mac(*mac).await
+    }
+
+    /// Resolve the shard whose Redis db1 cache entry shows the device as connected.
+    pub async fn get_device_connected_shard_id(&self, device_mac: &MacAddress) -> Option<i32> {
+        let mut con = self.redis_infra_cache_client.clone();
+
+        let key = format!("shard_id_*|{}", device_mac);
+        let redis_keys: Vec<String> =
+            match redis::cmd("KEYS").arg(&key).query_async(&mut con).await {
+                Err(e) => {
+                    if e.is_io_error() {
+                        Self::set_redis_health_state_not_ready(e.to_string()).await;
+                    }
+                    error!(
+                        "Failed to get shard for device {} from Redis cache! Error: {}",
+                        device_mac.to_hex_string(),
+                        e
+                    );
+                    return None;
+                }
+                Ok(keys) => keys,
+            };
+
+        for redis_key in redis_keys {
+            let Some(shard_id) = Self::parse_shard_id_from_device_cache_key(&redis_key) else {
+                continue;
+            };
+
+            let device_str: String =
+                match redis::cmd("GET").arg(&redis_key).query_async(&mut con).await {
+                    Ok(dev) => dev,
+                    Err(e) => {
+                        if e.is_io_error() {
+                            Self::set_redis_health_state_not_ready(e.to_string()).await;
+                        }
+                        error!(
+                            "Failed to get device cache entry {}! Error: {}",
+                            redis_key, e
+                        );
+                        continue;
+                    }
+                };
+
+            match serde_json::from_str::<CGWDevice>(&device_str) {
+                Ok(dev) if dev.get_device_state() == CGWDeviceState::CGWDeviceConnected => {
+                    return Some(shard_id);
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    error!("Failed to deserialize device from Redis cache! Error: {e}");
+                    continue;
+                }
+            }
+        }
+
+        None
+    }
+
+    async fn update_existing_device_entry_in_redis_cache(
+        &self,
+        device_mac: &MacAddress,
+        group_id: i32,
+        remains_in_db: bool,
+    ) -> Result<bool> {
+        let mut con = self.redis_infra_cache_client.clone();
+        let pattern = format!("shard_id_*|{}", device_mac);
+        let redis_keys: Vec<String> = match redis::cmd("KEYS")
+            .arg(&pattern)
+            .query_async(&mut con)
+            .await
+        {
+            Ok(keys) => keys,
+            Err(e) => {
+                if e.is_io_error() {
+                    Self::set_redis_health_state_not_ready(e.to_string()).await;
+                }
+                return Err(Error::RemoteDiscovery(
+                    "Failed to query Redis devices cache",
+                ));
+            }
+        };
+
+        let mut fallback: Option<(String, CGWDevice)> = None;
+
+        for redis_key in redis_keys {
+            let device_str: String = match redis::cmd("GET").arg(&redis_key).query_async(&mut con).await
+            {
+                Ok(dev) => dev,
+                Err(e) => {
+                    if e.is_io_error() {
+                        Self::set_redis_health_state_not_ready(e.to_string()).await;
+                    }
+                    continue;
+                }
+            };
+
+            let Ok(mut device) = serde_json::from_str::<CGWDevice>(&device_str) else {
+                continue;
+            };
+
+            device.set_device_group_id(group_id);
+            device.set_device_remains_in_db(remains_in_db);
+
+            if device.get_device_state() == CGWDeviceState::CGWDeviceConnected {
+                let device_json = serde_json::to_string(&device).map_err(|_| {
+                    Error::RemoteDiscovery("Failed to serialize device cache entry")
+                })?;
+                let res: RedisResult<()> = redis::cmd("SET")
+                    .arg(&redis_key)
+                    .arg(&device_json)
+                    .query_async(&mut con)
+                    .await;
+                match res {
+                    Ok(()) => return Ok(true),
+                    Err(e) => {
+                        if e.is_io_error() {
+                            Self::set_redis_health_state_not_ready(e.to_string()).await;
+                        }
+                        return Err(Error::RemoteDiscovery(
+                            "Failed to update Redis devices cache",
+                        ));
+                    }
+                }
+            }
+
+            if fallback.is_none() {
+                fallback = Some((redis_key, device));
+            }
+        }
+
+        if let Some((redis_key, device)) = fallback {
+            let device_json = serde_json::to_string(&device)
+                .map_err(|_| Error::RemoteDiscovery("Failed to serialize device cache entry"))?;
+            let res: RedisResult<()> = redis::cmd("SET")
+                .arg(&redis_key)
+                .arg(&device_json)
+                .query_async(&mut con)
+                .await;
+            match res {
+                Ok(()) => return Ok(true),
+                Err(e) => {
+                    if e.is_io_error() {
+                        Self::set_redis_health_state_not_ready(e.to_string()).await;
+                    }
+                    return Err(Error::RemoteDiscovery(
+                        "Failed to update Redis devices cache",
+                    ));
+                }
+            }
+        }
+
+        Ok(false)
     }
 
     pub async fn sync_devices_cache_with_redis(

@@ -272,6 +272,7 @@ enum CGWNBApiParsedMsgType {
     InfrastructureGroupDelete,
     InfrastructureGroupInfrasAdd(Vec<MacAddress>),
     InfrastructureGroupInfrasDel(Vec<MacAddress>),
+    InfrastructureGroupInfraDisconnect(MacAddress),
     InfrastructureGroupInfraMsg(MacAddress, String, Option<u64>),
     RebalanceGroups,
 }
@@ -692,6 +693,14 @@ impl CGWConnectionServer {
         }
 
         #[derive(Debug, Serialize, Deserialize)]
+        struct InfraGroupInfraDisconnect {
+            r#type: String,
+            infra_group_id: String,
+            infra_group_infras: MacAddress,
+            uuid: Uuid,
+        }
+
+        #[derive(Debug, Serialize, Deserialize)]
         struct RebalanceGroups {
             r#type: String,
             infra_group_id: String,
@@ -766,6 +775,16 @@ impl CGWConnectionServer {
                     ),
                 ));
             }
+            "infrastructure_group_infras_disconnect" => {
+                let json_msg: InfraGroupInfraDisconnect = serde_json::from_str(pload).ok()?;
+                return Some(CGWNBApiParsedMsg::new(
+                    json_msg.uuid,
+                    group_id,
+                    CGWNBApiParsedMsgType::InfrastructureGroupInfraDisconnect(
+                        json_msg.infra_group_infras,
+                    ),
+                ));
+            }
             "rebalance_groups" => {
                 let json_msg: RebalanceGroups = serde_json::from_str(pload).ok()?;
                 return Some(CGWNBApiParsedMsg::new(
@@ -818,6 +837,31 @@ impl CGWConnectionServer {
                 0i64
             }
         }
+    }
+
+    async fn disconnect_infrastructure_device(&self, device_mac: MacAddress) -> Result<()> {
+        let tx_opt = {
+            let connmap_lock = self.connmap.map.read().await;
+            connmap_lock.get(&device_mac).cloned()
+        };
+
+        let Some(tx) = tx_opt else {
+            return Err(Error::ConnectionServer("Device is not connected".to_string()));
+        };
+
+        if let Err(e) = tx.send(CGWConnectionProcessorReqMsg::AddNewConnectionShouldClose) {
+            warn!(
+                "Failed to send disconnection request for {}! Error: {e}",
+                device_mac.to_hex_string()
+            );
+        }
+
+        self.enqueue_mbox_message_to_cgw_server(CGWConnectionServerReqMsg::ConnectionClosed(
+            device_mac,
+        ))
+        .await;
+
+        Ok(())
     }
 
     async fn process_internal_nb_api_mbox(
@@ -1204,23 +1248,60 @@ impl CGWConnectionServer {
                 // forwarded to.
                 // In order to get it, match to <any> parsed msg, and
                 // get only gid field.
-                let gid: i32 = match parsed_msg {
-                    CGWNBApiParsedMsg { gid, .. } => gid,
+                let gid: i32 = match &parsed_msg {
+                    CGWNBApiParsedMsg { gid, .. } => *gid,
                 };
 
-                match self
-                    .cgw_remote_discovery
-                    .get_infra_group_owner_id(gid)
-                    .await
-                {
+                let dst_cgw_id = match &parsed_msg {
+                    CGWNBApiParsedMsg {
+                        gid: 0,
+                        msg_type:
+                            CGWNBApiParsedMsgType::InfrastructureGroupInfraDisconnect(device_mac),
+                        ..
+                    } => self
+                        .cgw_remote_discovery
+                        .get_device_connected_shard_id(device_mac)
+                        .await,
+                    _ => self.cgw_remote_discovery.get_infra_group_owner_id(gid).await,
+                };
+
+                match dst_cgw_id {
                     Some(dst_cgw_id) => {
                         if dst_cgw_id == self.local_cgw_id {
+                            if let CGWNBApiParsedMsg {
+                                uuid,
+                                msg_type:
+                                    CGWNBApiParsedMsgType::InfrastructureGroupInfraDisconnect(
+                                        device_mac,
+                                    ),
+                                ..
+                            } = &parsed_msg
+                            {
+                                info!(
+                                    "disconnect uuid {} for infra {} resolved to local shard {}",
+                                    uuid, device_mac, self.local_cgw_id
+                                );
+                            }
                             local_cgw_msg_buf.push(
                                 CGWConnectionNBAPIReqMsg::EnqueueNewMessageFromNBAPIListener(
                                     key, payload, origin,
                                 ),
                             );
                         } else {
+                            if let CGWNBApiParsedMsg {
+                                uuid,
+                                msg_type:
+                                    CGWNBApiParsedMsgType::InfrastructureGroupInfraDisconnect(
+                                        device_mac,
+                                    ),
+                                ..
+                            } = &parsed_msg
+                            {
+                                info!(
+                                    "relaying disconnect uuid {} for infra {} from shard {} to shard {}",
+                                    uuid, device_mac, self.local_cgw_id, dst_cgw_id
+                                );
+                            }
                             relayed_cgw_msg_buf.push((
                                 dst_cgw_id,
                                 CGWConnectionNBAPIReqMsg::EnqueueNewMessageFromNBAPIListener(
@@ -1230,6 +1311,20 @@ impl CGWConnectionServer {
                         }
                     }
                     None => {
+                        if let CGWNBApiParsedMsg {
+                            uuid,
+                            msg_type:
+                                CGWNBApiParsedMsgType::InfrastructureGroupInfraDisconnect(
+                                    device_mac,
+                                ),
+                            ..
+                        } = &parsed_msg
+                        {
+                            info!(
+                                "disconnect uuid {} for infra {} has no shard mapping, handling on local shard {}",
+                                uuid, device_mac, self.local_cgw_id
+                            );
+                        }
                         // Failed to find destination GID shard ID owner
                         // It is more likely GID does not exist
                         // Add request to local message buffer - let CGW process request
@@ -1595,6 +1690,78 @@ impl CGWConnectionServer {
 
                                         warn!("Failed to destroy few MACs from infras list (partial delete)!");
                                         continue;
+                                    }
+                                }
+                            }
+                        }
+                        CGWNBApiParsedMsg {
+                            uuid,
+                            gid,
+                            msg_type:
+                                CGWNBApiParsedMsgType::InfrastructureGroupInfraDisconnect(
+                                    device_mac,
+                                ),
+                        } => {
+                            let is_connected_locally = {
+                                let devices_cache = self.devices_cache.read().await;
+                                matches!(
+                                    devices_cache.get_device(&device_mac),
+                                    Some(infra)
+                                        if infra.get_device_state()
+                                            == CGWDeviceState::CGWDeviceConnected
+                                )
+                            };
+
+                            if !is_connected_locally {
+                                if let Ok(resp) = cgw_construct_infra_enqueue_response(
+                                    self.local_cgw_id,
+                                    uuid,
+                                    false,
+                                    Some(format!(
+                                        "Failed to disconnect infra {device_mac}, uuid {uuid}: device is not connected on shard {}",
+                                        self.local_cgw_id
+                                    )),
+                                    local_shard_partition_key.clone(),
+                                ) {
+                                    self.enqueue_mbox_message_from_cgw_to_nb_api(gid, resp);
+                                } else {
+                                    error!("Failed to construct device_enqueue message!");
+                                }
+
+                                continue;
+                            }
+
+                            match self.disconnect_infrastructure_device(device_mac).await {
+                                Ok(()) => {
+                                    info!(
+                                        "disconnect uuid {} accepted for infra {} on shard {} without group_id modification",
+                                        uuid, device_mac, self.local_cgw_id
+                                    );
+                                    if let Ok(resp) = cgw_construct_infra_enqueue_response(
+                                        self.local_cgw_id,
+                                        uuid,
+                                        true,
+                                        None,
+                                        local_shard_partition_key.clone(),
+                                    ) {
+                                        self.enqueue_mbox_message_from_cgw_to_nb_api(gid, resp);
+                                    } else {
+                                        error!("Failed to construct device_enqueue message!");
+                                    }
+                                }
+                                Err(e) => {
+                                    if let Ok(resp) = cgw_construct_infra_enqueue_response(
+                                        self.local_cgw_id,
+                                        uuid,
+                                        false,
+                                        Some(format!(
+                                            "Failed to disconnect infra {device_mac}, uuid {uuid}: {e}"
+                                        )),
+                                        local_shard_partition_key.clone(),
+                                    ) {
+                                        self.enqueue_mbox_message_from_cgw_to_nb_api(gid, resp);
+                                    } else {
+                                        error!("Failed to construct device_enqueue message!");
                                     }
                                 }
                             }
