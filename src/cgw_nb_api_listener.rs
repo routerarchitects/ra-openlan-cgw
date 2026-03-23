@@ -194,6 +194,16 @@ pub struct InfraLeaveMessage {
     pub reporter_shard_id: i32,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InfraPingMessage {
+    pub r#type: &'static str,
+    pub infra_group_id: i32,
+    pub infra_group_infra: MacAddress,
+    pub infra_public_ip: SocketAddr,
+    pub reporter_shard_id: i32,
+    pub ping_message_payload: String,
+}
+
 pub fn cgw_construct_infra_group_create_response(
     infra_group_id: i32,
     reporter_shard_id: i32,
@@ -464,6 +474,24 @@ pub fn cgw_construct_infra_leave_msg(
     };
 
     Ok(serde_json::to_string(&infra_leave_msg)?)
+}
+pub fn cgw_construct_infra_ping_msg(
+    infra_group_id: i32,
+    infra_group_infra: MacAddress,
+    infra_public_ip: SocketAddr,
+    reporter_shard_id: i32,
+    ping_message_payload: String,
+) -> Result<String> {
+    let infra_ping_msg = InfraPingMessage {
+        r#type: "infra_ping",
+        infra_group_id,
+        infra_group_infra,
+        infra_public_ip,
+        reporter_shard_id,
+        ping_message_payload,
+    };
+
+    Ok(serde_json::to_string(&infra_ping_msg)?)
 }
 
 pub fn cgw_construct_infra_request_result_msg(
