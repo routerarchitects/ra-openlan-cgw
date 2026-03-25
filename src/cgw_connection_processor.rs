@@ -7,7 +7,9 @@ use crate::{
     cgw_connection_server::{CGWConnectionServer, CGWConnectionServerReqMsg},
     cgw_device::{CGWDeviceCapabilities, CGWDeviceType},
     cgw_errors::{Error, Result},
-    cgw_nb_api_listener::cgw_construct_infra_request_result_msg,
+    cgw_nb_api_listener::{
+        cgw_construct_infra_ping_msg, cgw_construct_infra_request_result_msg,
+    },
     cgw_ucentral_messages_queue_manager::{
         CGWUCentralMessagesQueueItem, CGWUCentralMessagesQueueState, CGW_MESSAGES_QUEUE,
         MESSAGE_TIMEOUT_DURATION,
@@ -36,7 +38,7 @@ use tokio::{
 };
 use tokio_rustls::server::TlsStream;
 use tokio_tungstenite::{tungstenite::protocol::Message, WebSocketStream};
-use tungstenite::Message::{Close, Ping, Text};
+use tungstenite::Message::{Close, Ping, Pong, Text};
 
 type SStream = SplitStream<WebSocketStream<TlsStream<TcpStream>>>;
 type SSink = SplitSink<WebSocketStream<TlsStream<TcpStream>>, Message>;
@@ -229,7 +231,6 @@ impl CGWConnectionProcessor {
                 evt.serial
             ),
         }
-
         self.serial = evt.serial;
 
         self.device_type = match CGWDeviceType::from_str(caps.platform.as_str()) {
@@ -309,6 +310,7 @@ impl CGWConnectionProcessor {
 
     async fn process_wss_rx_msg(
         &self,
+        sink: &mut SSink,
         msg: std::result::Result<Message, tungstenite::error::Error>,
         fsm_state: &mut CGWUCentralMessageProcessorState,
         pending_req_id: u64,
@@ -417,7 +419,27 @@ impl CGWConnectionProcessor {
                         .enqueue_mbox_message_from_device_to_nb_api_c(self.group_id, kafaka_msg)?;
                     return Ok(CGWConnectionState::IsActive);
                 }
-                Ping(_t) => {
+                Ping(payload) => {
+                    let ping_message_payload = String::from_utf8(payload.to_vec()).map_err(|e| {
+                        error!(
+                            "Failed to decode WebSocket PING payload from {} as UTF-8: {e}",
+                            self.serial.to_hex_string()
+                        );
+                        Error::ConnectionProcessor("Failed to decode WebSocket PING payload")
+                    })?;
+                    if let Err(e) = sink.send(Pong(payload)).await {
+                        error!("Failed to send WebSocket PONG to {}! Error: {e}", self.addr);
+                        return Err(Error::ConnectionProcessor("Failed to send WebSocket PONG"));
+                    }
+                    let ping_msg = cgw_construct_infra_ping_msg(
+                        self.group_id,
+                        self.serial,
+                        self.addr,
+                        self.cgw_server.get_local_id(),
+                        ping_message_payload,
+                    )?;
+                    self.cgw_server
+                        .enqueue_mbox_message_from_cgw_to_nb_api(self.group_id, ping_msg);
                     return Ok(CGWConnectionState::IsActive);
                 }
                 _ => {}
@@ -682,8 +704,14 @@ impl CGWConnectionProcessor {
             let rc = match wakeup_reason {
                 WakeupReason::WSSRxMsg(res) => {
                     last_contact = Instant::now();
-                    self.process_wss_rx_msg(res, &mut fsm_state, pending_req_id, pending_req_uuid)
-                        .await
+                    self.process_wss_rx_msg(
+                        &mut sink,
+                        res,
+                        &mut fsm_state,
+                        pending_req_id,
+                        pending_req_uuid,
+                    )
+                    .await
                 }
                 WakeupReason::MboxRx(mbox_message) => {
                     self.process_sink_mbox_rx_msg(&mut sink, mbox_message).await

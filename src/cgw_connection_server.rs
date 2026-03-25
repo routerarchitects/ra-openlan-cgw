@@ -559,6 +559,12 @@ impl CGWConnectionServer {
         });
     }
 
+    pub async fn enqueue_mbox_message_from_cgw_to_nb_api_wait(&self, gid: i32, req: String) {
+        self.nb_api_client
+            .enqueue_mbox_message_from_cgw_server(gid.to_string(), req)
+            .await;
+    }
+
     /// \brief Drop connections to devices owned by other CGW shards and notify NB API.
     /// \details Walks the local cache to find devices whose infra group is managed by a different CGW,
     /// constructs a `foreign_infra_connection` and publish on CnC_Res, schedules the device connection to close,
